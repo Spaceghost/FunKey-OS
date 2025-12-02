@@ -49,7 +49,7 @@ do_postinst()
 
     # Copy freeware games and other necessary mnt files
     #unzip -q -o ${root_mount}/usr/local/share/freeware_games.zip -d /mnt/
-    unzip -q -o ${root_mount}/usr/local/share/funkey_files.zip -d /mnt/
+    unzip -q -n ${root_mount}/usr/local/share/funkey_files.zip -d /mnt/
 
     # Remove previous OPKs for default emulators
     rm /mnt/Emulators/gb_gbc_gnuboy_funkey-s.opk
