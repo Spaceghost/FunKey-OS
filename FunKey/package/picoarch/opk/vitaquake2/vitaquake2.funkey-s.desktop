@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Quake II
+Comment=VitaQuake 2 for Libretro
+Exec=picoarch /mnt/Libretro/cores/vitaquake2_libretro.so %f
+Icon=vitaquake2
+Categories=games
+SelectorDir=/mnt/Quake II/baseq2
+SelectorFilter=pak

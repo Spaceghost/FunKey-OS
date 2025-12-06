@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Wolfenstein 3D
+Comment=ECWolf for Libretro
+Exec=picoarch /mnt/Libretro/cores/ecwolf_libretro.so %f
+Icon=ecwolf
+Categories=games
+SelectorDir=/mnt/Wolfenstein 3D
+SelectorFilter=wl6,n3d,sod,sdm,wl1,pk3

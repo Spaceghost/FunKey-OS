@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=DOOM
+Comment=PrBoom for Libretro
+Exec=picoarch /mnt/Libretro/cores/prboom_libretro.so %f
+Icon=prboom
+Categories=games
+SelectorDir=/mnt/DOOM/doom
+SelectorFilter=wad,iwad,pwad,lmp

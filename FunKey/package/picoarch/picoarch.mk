@@ -61,6 +61,10 @@ define PICOARCH_CREATE_OPK
 	$(HOST_DIR)/usr/bin/mksquashfs $(PICOARCH_PKGDIR)/opk/mame2000 $(TARGET_DIR)/usr/local/share/OPKs/Libretro/mame2000_picoarch_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 	$(HOST_DIR)/usr/bin/mksquashfs $(PICOARCH_PKGDIR)/opk/pico8 $(TARGET_DIR)/usr/local/share/OPKs/Libretro/pico8_picoarch_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 	$(HOST_DIR)/usr/bin/mksquashfs $(PICOARCH_PKGDIR)/opk/pokemini $(TARGET_DIR)/usr/local/share/OPKs/Libretro/pokemini_picoarch_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+	$(HOST_DIR)/usr/bin/mksquashfs $(PICOARCH_PKGDIR)/opk/prboom $(TARGET_DIR)/usr/local/share/OPKs/Libretro/prboom_picoarch_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+	$(HOST_DIR)/usr/bin/mksquashfs $(PICOARCH_PKGDIR)/opk/tyrquake $(TARGET_DIR)/usr/local/share/OPKs/Libretro/tyrquake_picoarch_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+	$(HOST_DIR)/usr/bin/mksquashfs $(PICOARCH_PKGDIR)/opk/vitaquake2 $(TARGET_DIR)/usr/local/share/OPKs/Libretro/vitaquake2_picoarch_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+	$(HOST_DIR)/usr/bin/mksquashfs $(PICOARCH_PKGDIR)/opk/ecwolf $(TARGET_DIR)/usr/local/share/OPKs/Libretro/ecwolf_picoarch_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 endef
 PICOARCH_POST_INSTALL_TARGET_HOOKS += PICOARCH_CREATE_OPK
 

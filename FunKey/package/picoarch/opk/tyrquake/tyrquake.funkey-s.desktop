@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Quake
+Comment=TyrQuake for Libretro
+Exec=picoarch /mnt/Libretro/cores/tyrquake_libretro.so %f
+Icon=tyrquake
+Categories=games
+SelectorDir=/mnt/Quake/id1
+SelectorFilter=pak
