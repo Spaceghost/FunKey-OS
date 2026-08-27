@@ -13,6 +13,10 @@ done
 # Remove log daemon init scripts since they are loaded from inittab
 rm -f ${TARGET_DIR}/etc/init.d/S01syslogd ${TARGET_DIR}/etc/init.d/S02klogd
 
+# LZO installs standalone demonstration programs that are not used at runtime.
+rm -rf "${TARGET_DIR}/usr/libexec/lzo/examples"
+rmdir "${TARGET_DIR}/usr/libexec/lzo" 2>/dev/null || true
+
 # Remove dhcp lib dir and link to /tmp
 rm -rf "${TARGET_DIR}/var/lib/dhcp"
 ln -s /tmp "${TARGET_DIR}/var/lib/dhcp"
