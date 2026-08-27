@@ -1,0 +1,127 @@
+#!/bin/bash
+set -e
+
+host_bin=$(cd "$(dirname "$0")" && pwd)
+sysroot=$(cd "$host_bin/../arm-buildroot-linux-musleabihf/sysroot" && pwd)
+
+if [[ $# -eq 1 && $1 == -v ]]; then
+	exec zig cc -target arm-linux-musleabihf -v
+fi
+
+compile=false
+preprocess_only=false
+for arg in "$@"; do
+	case "$arg" in
+		-c|-S|-E|-M|-MM) compile=true ;;
+	esac
+	case "$arg" in
+		-E|-M|-MM) preprocess_only=true ;;
+	esac
+done
+
+args=()
+gcc_args=()
+use_sysroot_headers=true
+gcc_dependency_pass=false
+assembly_source=false
+c_source=false
+legacy_asm_generator=false
+soft_float_source=false
+next_is_output=false
+for arg in "$@"; do
+	if $next_is_output; then
+		next_is_output=false
+		continue
+	fi
+	if [[ $arg == -o ]]; then
+		next_is_output=true
+		continue
+	fi
+	case "$arg" in
+		*.c)
+			if [[ -f $arg ]]; then
+				c_source=true
+			fi ;;
+		*.S|*.s)
+			if [[ -f $arg ]]; then
+				assembly_source=true
+			fi ;;
+		*/examples/standalone/stubs.c|examples/standalone/stubs.c)
+			# Old U-Boot injects its exported assembly stubs from an otherwise
+			# unused C function. Clang legitimately removes that function.
+			legacy_asm_generator=true ;;
+	esac
+done
+
+for arg in "$@"; do
+	case "$arg" in
+		-Qunused-arguments|--target=*|--gcc-toolchain=*|--prefix=*|-mno-global-merge|-Wno-format-invalid-specifier|-Wno-gnu|-Wno-address-of-packed-member|-Wno-tautological-compare)
+			;;
+		-march=armv5t)
+			gcc_args+=("-march=armv7-a") ;;
+		*) gcc_args+=("$arg") ;;
+	esac
+
+	case "$arg" in
+		-std=c++*)
+			if ! $c_source; then
+				args+=("$arg")
+			fi ;;
+		-Wp,-MD,*)
+			gcc_dependency_pass=true ;;
+		-Qunused-arguments)
+			;;
+		-march=armv7-a+neon-vfpv4|-mcpu=cortex_a7|-mtune=cortex-a7|-mtune=generic-armv7-a|-mvectorize-with-neon-quad|-fstack-usage|-flto|-flto=*)
+			;;
+		-msoft-float)
+			soft_float_source=true ;;
+		-nostdinc)
+			use_sysroot_headers=false
+			args+=("$arg") ;;
+		-Werror=date-time)
+			args+=("-Wno-error=date-time") ;;
+		*) args+=("$arg") ;;
+	esac
+done
+
+if ! $compile; then
+	exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "${gcc_args[@]}"
+fi
+
+if $assembly_source || $legacy_asm_generator || $soft_float_source; then
+	exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "${gcc_args[@]}"
+fi
+
+if $gcc_dependency_pass; then
+	(exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "${gcc_args[@]}")
+fi
+
+system_headers=()
+if $use_sysroot_headers; then
+	system_headers=(-I "$sysroot/usr/include")
+fi
+
+cpu_args=(-mcpu=cortex_a7)
+if $preprocess_only; then
+	cpu_args=()
+fi
+
+exec zig cc \
+	-target arm-linux-musleabihf \
+	--sysroot="$sysroot" \
+	"${cpu_args[@]}" \
+	-mfpu=neon-vfpv4 \
+	-mfloat-abi=hard \
+	-fno-sanitize=undefined \
+	-fno-unwind-tables \
+	-fno-asynchronous-unwind-tables \
+	"${args[@]}" \
+	"${system_headers[@]}" \
+	-Wno-error=date-time \
+	-Wno-error=c23-extensions \
+	-Wno-error=implicit-function-declaration \
+	-Wno-error=incompatible-function-pointer-types \
+	-Wno-error=macro-redefined \
+	-Wno-error=parentheses \
+	-Wno-error=tautological-overlap-compare \
+	-Wno-error=zero-length-array

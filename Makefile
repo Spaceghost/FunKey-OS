@@ -29,12 +29,23 @@ MESSAGE = echo "$(shell date +%Y-%m-%dT%H:%M:%S) $(TERM_BOLD)\#\#\# $(call qstri
 TERM_BOLD := $(shell tput smso 2>/dev/null)
 TERM_RESET := $(shell tput rmso 2>/dev/null)
 
-.PHONY: fun source image update defconfig clean distclean
+.PHONY: fun source image update defconfig clean distclean zig-cc zig-restore zig-all
 
 .IGNORE: _Makefile_
 
 all: image update
 	@:
+
+zig-cc: FunKey/toolchain Recovery/toolchain
+	@./scripts/install-zig-cc FunKey/output
+	@./scripts/install-zig-cc Recovery/output
+
+zig-restore:
+	@./scripts/install-zig-cc --restore FunKey/output
+	@./scripts/install-zig-cc --restore Recovery/output
+
+zig-all: zig-cc
+	@$(MAKE) all
 
 _Makefile_:
 	@:

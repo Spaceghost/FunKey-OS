@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+restore=false
+if [ "${1:-}" = "--restore" ]; then
+	restore=true
+	shift
+fi
+
+if [ "$#" -ne 1 ]; then
+	echo "usage: $0 [--restore] OUTPUT_DIR" >&2
+	exit 2
+fi
+
+host_bin=$1/host/bin
+compiler=$host_bin/arm-linux-gcc
+saved=$host_bin/arm-linux-gcc.buildroot
+wrapper=$host_bin/arm-linux-zig-cc
+
+if $restore; then
+	if [ -L "$saved" ]; then
+		rm -f "$compiler" "$wrapper"
+		mv "$saved" "$compiler"
+	fi
+	exit 0
+fi
+
+if ! command -v zig >/dev/null 2>&1; then
+	echo "zig is required in PATH" >&2
+	exit 1
+fi
+
+if [ ! -x "$host_bin/toolchain-wrapper" ]; then
+	echo "Buildroot toolchain is not installed in $1" >&2
+	exit 1
+fi
+
+if [ ! -L "$saved" ]; then
+	mv "$compiler" "$saved"
+fi
+
+cp "$(dirname "$0")/zig-cc-wrapper" "$wrapper"
+chmod +x "$wrapper"
+ln -sfn "$(basename "$wrapper")" "$compiler"
