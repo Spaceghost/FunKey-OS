@@ -20,6 +20,10 @@
 BRMAKE = buildroot/utils/brmake -C buildroot
 BR = make -C buildroot
 
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
+E2FSPROGS_FAKE_TIME ?= $(SOURCE_DATE_EPOCH)
+export SOURCE_DATE_EPOCH E2FSPROGS_FAKE_TIME
+
 # Strip quotes and then whitespaces
 qstrip = $(strip $(subst ",,$(1)))
 #"))
@@ -112,35 +116,38 @@ source:
 
 image: fun
 	@$(call MESSAGE,"Creating disk image")
-	@rm -rf root tmp
-	@mkdir -p root tmp
-	@./Recovery/output/host/bin/genimage --loglevel 0 --inputpath .
-	@rm -rf root tmp
+	@rm -rf root-image tmp-image
+	@mkdir -p root-image tmp-image
+	@./Recovery/output/host/bin/genimage --loglevel 0 --inputpath . \
+		--rootpath root-image --tmppath tmp-image
+	@rm -rf root-image tmp-image
 	@mv images/sdcard.img images/FunKey-sdcard-DrUm78_RG_Nano.img
 
 image-prod: fun
 	@$(call MESSAGE,"Creating disk image")
-	@rm -rf root tmp
-	@mkdir -p root tmp
-	@./Recovery/output/host/bin/genimage --loglevel 0 --config "genimage-prod.cfg" --inputpath .
-	@rm -rf root tmp
+	@rm -rf root-image-prod tmp-image-prod
+	@mkdir -p root-image-prod tmp-image-prod
+	@./Recovery/output/host/bin/genimage --loglevel 0 --config "genimage-prod.cfg" --inputpath . \
+		--rootpath root-image-prod --tmppath tmp-image-prod
+	@rm -rf root-image-prod tmp-image-prod
 	@mv images/sdcard-prod.img images/FunKey-sdcard-prod-DrUm78_RG_Nano.img
 
 update: fun
 	@$(call MESSAGE,"Creating update file")
-	@rm -rf tmp
-	@mkdir -p tmp
-	@cp FunKey/board/funkey/sw-description tmp/
-	@cp FunKey/board/funkey/update_partition tmp/
+	@rm -rf tmp-update
+	@mkdir -p tmp-update
+	@cp FunKey/board/funkey/sw-description tmp-update/
+	@cp FunKey/board/funkey/update_partition tmp-update/
 	@cd FunKey/output/images && \
 	rm -f rootfs.ext2.gz && \
-	gzip -k rootfs.ext2 &&\
-	mv rootfs.ext2.gz ../../../tmp/
-	@cd tmp && \
+	gzip -n -k rootfs.ext2 &&\
+	mv rootfs.ext2.gz ../../../tmp-update/
+	@touch -h -d "@$(SOURCE_DATE_EPOCH)" tmp-update/*
+	@cd tmp-update && \
 	echo sw-description rootfs.ext2.gz update_partition | \
 	tr " " "\n" | \
-	cpio -o -H crc --quiet > ../images/FunKey-rootfs-DrUm78_RG_Nano.fwu
-	@rm -rf tmp
+	cpio --reproducible --owner=0:0 -o -H crc --quiet > ../images/FunKey-rootfs-DrUm78_RG_Nano.fwu
+	@rm -rf tmp-update
 
 defconfig:
 	@$(call MESSAGE,"Updating default configs")
