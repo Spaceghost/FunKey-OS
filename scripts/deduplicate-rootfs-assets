@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Hardlink byte-identical assembled assets with matching file metadata."""
+"""Normalize static asset modes and hardlink byte-identical files."""
 
 import collections
 import hashlib
@@ -16,6 +16,22 @@ ASSET_ROOTS = (
     "usr/local/share",
     "usr/bin/commander",
     "usr/bin/gmu",
+)
+
+STATIC_SUFFIXES = frozenset(
+    {
+        ".bmp",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".mp3",
+        ".ogg",
+        ".otf",
+        ".png",
+        ".svg",
+        ".ttf",
+        ".wav",
+    }
 )
 
 
@@ -36,6 +52,7 @@ def xattrs(path):
 
 def candidates(root):
     grouped = collections.defaultdict(list)
+    normalized_modes = 0
     for relative_root in ASSET_ROOTS:
         asset_root = root / relative_root
         if not asset_root.is_dir():
@@ -47,6 +64,11 @@ def candidates(root):
                 continue
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0:
                 continue
+            mode = stat.S_IMODE(metadata.st_mode)
+            if path.suffix.lower() in STATIC_SUFFIXES and mode & 0o111:
+                os.chmod(path, mode & ~0o111)
+                metadata = os.lstat(path)
+                normalized_modes += 1
             key = (
                 metadata.st_size,
                 stat.S_IMODE(metadata.st_mode),
@@ -55,13 +77,14 @@ def candidates(root):
                 xattrs(path),
             )
             grouped[key].append(path)
-    return grouped
+    return grouped, normalized_modes
 
 
 def deduplicate(root):
     linked_paths = 0
     saved_bytes = 0
-    for metadata_key, same_metadata in candidates(root).items():
+    grouped, normalized_modes = candidates(root)
+    for metadata_key, same_metadata in grouped.items():
         if len(same_metadata) < 2:
             continue
         same_content = collections.defaultdict(list)
@@ -92,15 +115,18 @@ def deduplicate(root):
                         pass
                 linked_paths += 1
                 saved_bytes += metadata_key[0]
-    return linked_paths, saved_bytes
+    return normalized_modes, linked_paths, saved_bytes
 
 
 def main():
     if len(sys.argv) != 2:
         raise SystemExit(f"usage: {sys.argv[0]} TARGET_DIR")
     root = pathlib.Path(sys.argv[1]).resolve()
-    linked_paths, saved_bytes = deduplicate(root)
-    print(f"Deduplicated {linked_paths} asset paths, saving {saved_bytes} bytes")
+    normalized_modes, linked_paths, saved_bytes = deduplicate(root)
+    print(
+        f"Normalized {normalized_modes} static asset modes; "
+        f"deduplicated {linked_paths} paths, saving {saved_bytes} bytes"
+    )
 
 
 if __name__ == "__main__":
