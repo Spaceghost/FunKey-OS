@@ -1,0 +1,34 @@
+From: Spaceghost <Spaceghost@users.noreply.github.com>
+Date: Thu, 27 Aug 2026 08:25:00 -0700
+Subject: [PATCH] create_inode: use source mtime for reproducible ctime
+
+Buildroot can normalize source-tree mtimes for reproducible images, but a
+normal touch cannot set ctime.  Copying the host ctime into every populated
+inode therefore makes otherwise identical ext filesystems differ on every
+build.
+
+When SOURCE_DATE_EPOCH is present, use the already-normalized source mtime as
+the inode ctime too.  Preserve the existing behavior for ordinary mke2fs use.
+
+---
+ misc/create_inode.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/misc/create_inode.c b/misc/create_inode.c
+index 8a2f64f..6307c9a 100644
+--- a/misc/create_inode.c
++++ b/misc/create_inode.c
+@@ -127,7 +127,10 @@ static errcode_t set_inode_extra(ext2_filsys fs, ext2_ino_t ino,
+ 	inode.i_mode = (LINUX_S_IFMT & inode.i_mode) | (~S_IFMT & st->st_mode);
+ 	inode.i_atime = st->st_atime;
+ 	inode.i_mtime = st->st_mtime;
+-	inode.i_ctime = st->st_ctime;
++	if (getenv("SOURCE_DATE_EPOCH"))
++		inode.i_ctime = st->st_mtime;
++	else
++		inode.i_ctime = st->st_ctime;
+ 
+ 	retval = ext2fs_write_inode(fs, ino, &inode);
+ 	if (retval)
+-- 
+2.39.5
