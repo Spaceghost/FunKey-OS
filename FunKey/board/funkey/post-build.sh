@@ -17,6 +17,23 @@ rm -f ${TARGET_DIR}/etc/init.d/S01syslogd ${TARGET_DIR}/etc/init.d/S02klogd
 rm -rf "${TARGET_DIR}/usr/libexec/lzo/examples"
 rmdir "${TARGET_DIR}/usr/libexec/lzo" 2>/dev/null || true
 
+# The on-device system statistics overlay uses mpstat only. Keep the complete
+# sysstat suite in Recovery, but omit unused production collectors and reports.
+rm -f \
+	"${TARGET_DIR}/usr/bin/cifsiostat" \
+	"${TARGET_DIR}/usr/bin/iostat" \
+	"${TARGET_DIR}/usr/bin/pidstat" \
+	"${TARGET_DIR}/usr/bin/sadf" \
+	"${TARGET_DIR}/usr/bin/sar" \
+	"${TARGET_DIR}/usr/bin/tapestat" \
+	"${TARGET_DIR}/usr/lib64/sa/sa1" \
+	"${TARGET_DIR}/usr/lib64/sa/sa2" \
+	"${TARGET_DIR}/usr/lib64/sa/sadc" \
+	"${TARGET_DIR}/etc/sysconfig/sysstat" \
+	"${TARGET_DIR}/etc/sysconfig/sysstat.ioconf"
+rmdir "${TARGET_DIR}/usr/lib64/sa" 2>/dev/null || true
+rmdir "${TARGET_DIR}/etc/sysconfig" 2>/dev/null || true
+
 # Remove dhcp lib dir and link to /tmp
 rm -rf "${TARGET_DIR}/var/lib/dhcp"
 ln -s /tmp "${TARGET_DIR}/var/lib/dhcp"
