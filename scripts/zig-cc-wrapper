@@ -4,6 +4,12 @@ set -e
 host_bin=$(cd "$(dirname "$0")" && pwd)
 sysroot=$(cd "$host_bin/../arm-buildroot-linux-musleabihf/sysroot" && pwd)
 
+# GCC 10.2 produces a materially smaller BusyBox for this target. Keep that
+# package on the SDK compiler while using Zig for C elsewhere.
+case "$PWD/" in
+	*/busybox-*) exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "$@" ;;
+esac
+
 if [[ $# -eq 1 && $1 == -v ]]; then
 	exec zig cc -target arm-linux-musleabihf -v
 fi
