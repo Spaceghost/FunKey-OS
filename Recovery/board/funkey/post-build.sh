@@ -22,10 +22,9 @@ mkdir -p "${TARGET_DIR}/var/db"
 rm -rf "${TARGET_DIR}/var/db/dhcpcd"
 ln -s /tmp "${TARGET_DIR}/var/db/dhcpcd"
 
-# Change dropbear init sequence
-if [ -e "${TARGET_DIR}/etc/init.d/S50dropbear" ]; then
-	mv "${TARGET_DIR}/etc/init.d/S50dropbear" "${TARGET_DIR}/etc/init.d/S42dropbear"
-fi
+# The recovery overlay supplies a customized S42dropbear.  Discard the
+# package-provided S50dropbear instead of replacing the customized script.
+rm -f "${TARGET_DIR}/etc/init.d/S50dropbear"
 
 # Redirect drobear keys to /tmp
 rm -rf "${TARGET_DIR}/etc/dropbear"
