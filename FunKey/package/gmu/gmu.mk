@@ -17,6 +17,9 @@ define GMU_BUILD_CMDS
 	sed -i -e 's|rm -rf|#rm -rf|g' package; \
 	sed -i -e 's|make -f Makefile.funkey clean|#make -f Makefile.funkey clean|g' package; \
 	chmod +x package; \
+	PATH=/opt/FunKey-sdk/bin:$(PATH) \
+	PKG_CONFIG_SYSROOT_DIR=/opt/FunKey-sdk/arm-funkey-linux-musleabihf/sysroot \
+	PKG_CONFIG_LIBDIR=/opt/FunKey-sdk/arm-funkey-linux-musleabihf/sysroot/usr/lib/pkgconfig:/opt/FunKey-sdk/arm-funkey-linux-musleabihf/sysroot/usr/share/pkgconfig \
 	./package \
 	)
 endef
