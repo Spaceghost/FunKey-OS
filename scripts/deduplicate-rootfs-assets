@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+
+"""Hardlink byte-identical assembled assets with matching file metadata."""
+
+import collections
+import hashlib
+import os
+import pathlib
+import stat
+import sys
+
+
+ASSET_ROOTS = (
+    "usr/games",
+    "usr/share",
+    "usr/local/share",
+    "usr/bin/commander",
+    "usr/bin/gmu",
+)
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.digest()
+
+
+def xattrs(path):
+    return tuple(
+        (name, os.getxattr(path, name, follow_symlinks=False))
+        for name in sorted(os.listxattr(path, follow_symlinks=False))
+    )
+
+
+def candidates(root):
+    grouped = collections.defaultdict(list)
+    for relative_root in ASSET_ROOTS:
+        asset_root = root / relative_root
+        if not asset_root.is_dir():
+            continue
+        for path in asset_root.rglob("*"):
+            try:
+                metadata = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0:
+                continue
+            key = (
+                metadata.st_size,
+                stat.S_IMODE(metadata.st_mode),
+                metadata.st_uid,
+                metadata.st_gid,
+                xattrs(path),
+            )
+            grouped[key].append(path)
+    return grouped
+
+
+def deduplicate(root):
+    linked_paths = 0
+    saved_bytes = 0
+    for metadata_key, same_metadata in candidates(root).items():
+        if len(same_metadata) < 2:
+            continue
+        same_content = collections.defaultdict(list)
+        for path in same_metadata:
+            same_content[digest(path)].append(path)
+        for paths in same_content.values():
+            if len(paths) < 2:
+                continue
+            paths.sort(key=lambda path: str(path.relative_to(root)))
+            canonical = paths[0]
+            canonical_stat = os.lstat(canonical)
+            canonical_identity = (canonical_stat.st_dev, canonical_stat.st_ino)
+            for index, duplicate in enumerate(paths[1:]):
+                duplicate_stat = os.lstat(duplicate)
+                duplicate_identity = (duplicate_stat.st_dev, duplicate_stat.st_ino)
+                if duplicate_identity == canonical_identity:
+                    continue
+                temporary = duplicate.with_name(
+                    f".{duplicate.name}.deduplicate-{os.getpid()}-{index}"
+                )
+                try:
+                    os.link(canonical, temporary)
+                    os.replace(temporary, duplicate)
+                finally:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
+                linked_paths += 1
+                saved_bytes += metadata_key[0]
+    return linked_paths, saved_bytes
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise SystemExit(f"usage: {sys.argv[0]} TARGET_DIR")
+    root = pathlib.Path(sys.argv[1]).resolve()
+    linked_paths, saved_bytes = deduplicate(root)
+    print(f"Deduplicated {linked_paths} asset paths, saving {saved_bytes} bytes")
+
+
+if __name__ == "__main__":
+    main()
