@@ -68,13 +68,13 @@ buildroot/.git:
 fun: buildroot Recovery/output/.config FunKey/output/.config
 	@$(call MESSAGE,"Making fun")
 	@$(call MESSAGE,"Making fun in Recovery")
-	@$(BRMAKE) BR2_EXTERNAL=../Recovery O=../Recovery/output
+	+@$(BRMAKE) BR2_EXTERNAL=../Recovery O=../Recovery/output
 	@$(call MESSAGE,"Making fun in FunKey")
-	@$(BRMAKE) BR2_EXTERNAL=../FunKey O=../FunKey/output
+	+@$(BRMAKE) BR2_EXTERNAL=../FunKey O=../FunKey/output
 
 sdk: buildroot SDK/output/.config
 	@$(call MESSAGE,"Making FunKey SDK")
-	@$(BRMAKE) BR2_EXTERNAL=../SDK O=../SDK/output prepare-sdk
+	+@$(BRMAKE) BR2_EXTERNAL=../SDK O=../SDK/output prepare-sdk
 	@$(call MESSAGE,"Generating SDK tarball")
 	@export LC_ALL=C; \
 	SDK=FunKey-sdk-DrUm78; \
@@ -94,15 +94,15 @@ sdk: buildroot SDK/output/.config
 
 FunKey/%: FunKey/output/.config
 	@$(call MESSAGE,"Making $(notdir $@) in $(subst /,,$(dir $@))")
-	@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output $(notdir $@)
+	+@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output $(notdir $@)
 
 Recovery/%: Recovery/output/.config
 	@$(call MESSAGE,"Making $(notdir $@) in $(subst /,,$(dir $@))")
-	@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output $(notdir $@)
+	+@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output $(notdir $@)
 
 SDK/%: SDK/output/.config
 	@$(call MESSAGE,"Making $(notdir $@) in $(subst /,,$(dir $@))")
-	@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output $(notdir $@)
+	+@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output $(notdir $@)
 
 #%: FunKey/output/.config
 #	@$(call MESSAGE,"Making $@ in FunKey")
@@ -110,9 +110,9 @@ SDK/%: SDK/output/.config
 
 source:
 	@$(call MESSAGE,"Getting sources")
-	@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output source
-	@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output source
-	@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output source
+	+@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output source
+	+@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output source
+	+@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output source
 
 image: fun
 	@$(call MESSAGE,"Creating disk image")
@@ -152,17 +152,17 @@ update: fun
 defconfig:
 	@$(call MESSAGE,"Updating default configs")
 	@$(call MESSAGE,"Updating default configs in SDK")
-	@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output savedefconfig
+	+@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output savedefconfig
 	@$(call MESSAGE,"Updating default configs in Recovery")
-	@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output savedefconfig linux-update-defconfig uboot-update-defconfig busybox-update-config
+	+@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output savedefconfig linux-update-defconfig uboot-update-defconfig busybox-update-config
 	@$(call MESSAGE,"Updating default configs in FunKey")
-	@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output savedefconfig linux-update-defconfig busybox-update-config
+	+@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output savedefconfig linux-update-defconfig busybox-update-config
 
 clean:
 	@$(call MESSAGE,"Clean everything")
-	@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output distclean
-	@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output distclean
-	@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output distclean
+	+@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output distclean
+	+@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output distclean
+	+@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output distclean
 	@rm -f br.log
 
 distclean: clean
@@ -172,14 +172,14 @@ distclean: clean
 FunKey/output/.config:
 	@$(call MESSAGE,"Configure FunKey")
 	@mkdir -p FunKey/board/funkey/patches
-	@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output funkey_defconfig
+	+@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output funkey_defconfig
 
 Recovery/output/.config:
 	@$(call MESSAGE,"Configure Recovery")
 	@mkdir -p Recovery/board/funkey/patches
-	@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output recovery_defconfig
+	+@$(BR) BR2_EXTERNAL=../Recovery O=../Recovery/output recovery_defconfig
 
 SDK/output/.config:
 	@$(call MESSAGE,"Configure SDK")
 	@mkdir -p SDK/board/funkey/patches
-	@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output funkey_defconfig
+	+@$(BR) BR2_EXTERNAL=../SDK O=../SDK/output funkey_defconfig
