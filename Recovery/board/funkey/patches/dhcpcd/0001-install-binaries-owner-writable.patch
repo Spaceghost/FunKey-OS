@@ -1,0 +1,27 @@
+From: Spaceghost <Spaceghost@users.noreply.github.com>
+Subject: [PATCH] install binaries owner-writable
+
+Buildroot strips target binaries as the unprivileged build user after package
+installation.  Installing dhcpcd mode 0555 prevents that finalizer from
+rewriting the binary, leaving debug information in production images.  Mode
+0755 retains the same runtime access while allowing the owner to strip it.
+
+---
+ Makefile.inc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile.inc b/Makefile.inc
+index ad7e43a..8ae0a8f 100644
+--- a/Makefile.inc
++++ b/Makefile.inc
+@@ -2,7 +2,7 @@
+ 
+ PICFLAG?=	-fPIC
+ 
+-BINMODE?=	0555
++BINMODE?=	0755
+ NONBINMODE?=	0444
+ MANMODE?=	${NONBINMODE}
+ CONFMODE?=	0644
+-- 
+2.39.5
