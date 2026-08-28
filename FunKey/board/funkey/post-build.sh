@@ -66,6 +66,20 @@ rm -f \
 ln -s ../../bin/busybox "${TARGET_DIR}/usr/bin/bunzip2"
 ln -s ../../bin/busybox "${TARGET_DIR}/usr/bin/bzcat"
 
+# Retain the PCRE and libxml2 C libraries used by GLib and libarchive, while
+# dropping their uncalled test/front-end tools and unused C++/POSIX PCRE ABIs.
+rm -f \
+	"${TARGET_DIR}/usr/bin/pcregrep" \
+	"${TARGET_DIR}/usr/bin/pcretest" \
+	"${TARGET_DIR}/usr/bin/xmlcatalog" \
+	"${TARGET_DIR}/usr/bin/xmllint" \
+	"${TARGET_DIR}/usr/lib/libpcrecpp.so" \
+	"${TARGET_DIR}/usr/lib/libpcrecpp.so.0" \
+	"${TARGET_DIR}/usr/lib/libpcrecpp.so.0.0.2" \
+	"${TARGET_DIR}/usr/lib/libpcreposix.so" \
+	"${TARGET_DIR}/usr/lib/libpcreposix.so.0" \
+	"${TARGET_DIR}/usr/lib/libpcreposix.so.0.0.7"
+
 # Remove dhcp lib dir and link to /tmp
 rm -rf "${TARGET_DIR}/var/lib/dhcp"
 ln -s /tmp "${TARGET_DIR}/var/lib/dhcp"
