@@ -138,7 +138,30 @@ rm -f \
 	"${TARGET_DIR}/usr/lib/libgthread-2.0.so.0.6600.3" \
 	"${TARGET_DIR}/usr/lib/libss.so" \
 	"${TARGET_DIR}/usr/lib/libss.so.2" \
-	"${TARGET_DIR}/usr/lib/libss.so.2.0"
+	"${TARGET_DIR}/usr/lib/libss.so.2.0" \
+	"${TARGET_DIR}/usr/lib/libSDL_net-1.2.so.0" \
+	"${TARGET_DIR}/usr/lib/libSDL_net-1.2.so.0.8.0" \
+	"${TARGET_DIR}/usr/lib/libSDL_net.so" \
+	"${TARGET_DIR}/usr/lib/libSDL_sound-1.0.so.1" \
+	"${TARGET_DIR}/usr/lib/libSDL_sound-1.0.so.1.0.2" \
+	"${TARGET_DIR}/usr/lib/libSDL_sound.so" \
+	"${TARGET_DIR}/usr/lib/libfmt.so" \
+	"${TARGET_DIR}/usr/lib/libfmt.so.7" \
+	"${TARGET_DIR}/usr/lib/libfmt.so.7.1.3" \
+	"${TARGET_DIR}/usr/lib/liblzo2.so" \
+	"${TARGET_DIR}/usr/lib/liblzo2.so.2" \
+	"${TARGET_DIR}/usr/lib/liblzo2.so.2.0.0" \
+	"${TARGET_DIR}/usr/lib/libpixman-1.so" \
+	"${TARGET_DIR}/usr/lib/libpixman-1.so.0" \
+	"${TARGET_DIR}/usr/lib/libpixman-1.so.0.40.0" \
+	"${TARGET_DIR}/usr/lib/libssl.so" \
+	"${TARGET_DIR}/usr/lib/libssl.so.1.1" \
+	"${TARGET_DIR}/usr/lib/libtinyxml2.so" \
+	"${TARGET_DIR}/usr/lib/libtinyxml2.so.8" \
+	"${TARGET_DIR}/usr/lib/libtinyxml2.so.8.0.0" \
+	"${TARGET_DIR}/usr/lib/libturbojpeg.so" \
+	"${TARGET_DIR}/usr/lib/libturbojpeg.so.0" \
+	"${TARGET_DIR}/usr/lib/libturbojpeg.so.0.2.0"
 
 # Remove dhcp lib dir and link to /tmp
 rm -rf "${TARGET_DIR}/var/lib/dhcp"
