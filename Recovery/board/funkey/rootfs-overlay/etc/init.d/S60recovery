@@ -22,7 +22,7 @@ case "$1" in
 		menu &
 		exit 1
 	    fi
-	    if ! swupdate -i "${FIRMWARE_UPDATE_FILE}"; then
+	    if ! install_firmware_update "${FIRMWARE_UPDATE_FILE}"; then
 		notif display 10 "         CORRUPTED^        UPDATE FILE"
 		menu &
 		exit 1
