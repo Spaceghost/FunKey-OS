@@ -115,6 +115,31 @@ rm -f \
 	"${TARGET_DIR}/usr/lib/libpcreposix.so.0" \
 	"${TARGET_DIR}/usr/lib/libpcreposix.so.0.0.7"
 
+# These optional ABIs have no ELF consumers or name-based loaders in the
+# production rootfs. Keep their parent packages and the libraries in use.
+rm -f \
+	"${TARGET_DIR}/usr/lib/libatopology.so" \
+	"${TARGET_DIR}/usr/lib/libatopology.so.2" \
+	"${TARGET_DIR}/usr/lib/libatopology.so.2.0.0" \
+	"${TARGET_DIR}/usr/lib/libconfig++.so" \
+	"${TARGET_DIR}/usr/lib/libconfig++.so.11" \
+	"${TARGET_DIR}/usr/lib/libconfig++.so.11.0.2" \
+	"${TARGET_DIR}/usr/lib/libgstallocators-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstallocators-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstallocators-1.0.so.0.1802.0" \
+	"${TARGET_DIR}/usr/lib/libgstcontroller-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstcontroller-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstcontroller-1.0.so.0.1802.0" \
+	"${TARGET_DIR}/usr/lib/libgstnet-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstnet-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstnet-1.0.so.0.1802.0" \
+	"${TARGET_DIR}/usr/lib/libgthread-2.0.so" \
+	"${TARGET_DIR}/usr/lib/libgthread-2.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgthread-2.0.so.0.6600.3" \
+	"${TARGET_DIR}/usr/lib/libss.so" \
+	"${TARGET_DIR}/usr/lib/libss.so.2" \
+	"${TARGET_DIR}/usr/lib/libss.so.2.0"
+
 # Remove dhcp lib dir and link to /tmp
 rm -rf "${TARGET_DIR}/var/lib/dhcp"
 ln -s /tmp "${TARGET_DIR}/var/lib/dhcp"
