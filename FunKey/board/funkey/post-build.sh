@@ -17,6 +17,14 @@ rm -f ${TARGET_DIR}/etc/init.d/S01syslogd ${TARGET_DIR}/etc/init.d/S02klogd
 rm -rf "${TARGET_DIR}/usr/libexec/lzo/examples"
 rmdir "${TARGET_DIR}/usr/libexec/lzo" 2>/dev/null || true
 
+# GMU loads libmpg123 through its decoder plugin; no production component
+# invokes mpg123's standalone players or tag-maintenance helpers.
+rm -f \
+	"${TARGET_DIR}/usr/bin/mpg123" \
+	"${TARGET_DIR}/usr/bin/mpg123-id3dump" \
+	"${TARGET_DIR}/usr/bin/mpg123-strip" \
+	"${TARGET_DIR}/usr/bin/out123"
+
 # The on-device system statistics overlay uses mpstat only. Keep the complete
 # sysstat suite in Recovery, but omit unused production collectors and reports.
 rm -f \
