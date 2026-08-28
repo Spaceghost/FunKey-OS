@@ -24,6 +24,11 @@ rm -f \
 	"${TARGET_DIR}/usr/bin/mpg123-id3dump" \
 	"${TARGET_DIR}/usr/bin/mpg123-strip" \
 	"${TARGET_DIR}/usr/bin/out123"
+rm -f \
+	"${TARGET_DIR}/usr/lib/libout123.so" \
+	"${TARGET_DIR}/usr/lib/libout123.so.0" \
+	"${TARGET_DIR}/usr/lib/libout123.so.0.2.2"
+rm -rf "${TARGET_DIR}/usr/lib/mpg123"
 
 # The on-device system statistics overlay uses mpstat only. Keep the complete
 # sysstat suite in Recovery, but omit unused production collectors and reports.
