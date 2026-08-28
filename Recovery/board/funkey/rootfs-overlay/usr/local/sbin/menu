@@ -140,7 +140,7 @@ menu_run () {
 		    if [ ${update_status} -eq 2 ]; then
 			notif display 10 "      MULTIPLE UPDATE FILES^       KEEP ONLY ONE .FWU"
 		    elif [ ${update_status} -eq 0 ]; then
-			if swupdate -i "${FIRMWARE_UPDATE_FILE}"; then
+			if install_firmware_update "${FIRMWARE_UPDATE_FILE}"; then
 			    notif set 0 "^^^^^^^^         RESTARTING...^^^^^^^^"
 			    normal_mode
 			else

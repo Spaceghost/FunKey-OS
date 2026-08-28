@@ -37,4 +37,24 @@ mkdir "$test_dir/FunKey-directory.fwu"
 find_firmware_update "$test_dir"
 [ "$?" -eq 2 ] || fail "a file plus matching directory was not rejected"
 
+calls=
+swupdate()
+{
+    calls="${calls}${calls:+|}$*"
+    return 0
+}
+install_firmware_update "$update" || fail "valid preflight blocked installation"
+[ "$calls" = "-c -i $update|-i $update" ] || fail "preflight did not precede installation"
+
+calls=
+swupdate()
+{
+    calls="${calls}${calls:+|}$*"
+    [ "$1" != "-c" ]
+}
+if install_firmware_update "$update"; then
+    fail "failed preflight was accepted"
+fi
+[ "$calls" = "-c -i $update" ] || fail "installation ran after failed preflight"
+
 echo "firmware update selector tests passed"
