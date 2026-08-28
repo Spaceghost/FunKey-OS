@@ -74,10 +74,11 @@ do_postinst()
     #####################
     # Erase update file #
     #####################
-    for file in $(ls /mnt/FunKey-*.fwu); do
+    set -- /mnt/FunKey-*.fwu
+    if [ "$#" -eq 1 ] && [ -f "$1" ]; then
         notif_set 0 " 4/4 ERASE UPDATE FILE^DO NOT TURN OFF THE CONSOLE"
-        rm -f "${file}"
-    done
+        rm -f "$1"
+    fi
     exit 0
 }
 

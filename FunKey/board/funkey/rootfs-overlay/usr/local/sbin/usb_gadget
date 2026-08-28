@@ -83,7 +83,7 @@ init_usb_gadget() {
 
     # Device String Descriptiors
     echo "FunKey" > ${GADGET}/strings/0x409/manufacturer
-    echo "FunKey S" > ${GADGET}/strings/0x409/product
+    echo "RG Nano" > ${GADGET}/strings/0x409/product
     echo ${SERIAL} > ${GADGET}/strings/0x409/serialnumber
 
     # Turn on "OS Descriptors" support for RNDIS
@@ -128,7 +128,7 @@ init_usb_gadget() {
 	# Add the "Label" Extended Property
 	mkdir ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label
 	echo 1 > ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label/type
-	echo "FunKey S Device" > ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label/data
+	echo "RG Nano Device" > ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label/data
     fi
 
     # Mass Storage Function
@@ -149,7 +149,7 @@ init_usb_gadget() {
     echo 1 > ${GADGET}/functions/mass_storage.mmcblk0p4/lun.0/removable
 
     # Inquiry String
-    echo "FunKey S Shared Disk" > ${GADGET}/functions/mass_storage.mmcblk0p4/lun.0/inquiry_string
+    echo "RG Nano Shared Disk" > ${GADGET}/functions/mass_storage.mmcblk0p4/lun.0/inquiry_string
 
     if [ ${USBNET} -eq 1 ]; then
 

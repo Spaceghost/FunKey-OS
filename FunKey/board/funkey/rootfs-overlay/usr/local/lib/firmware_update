@@ -1,0 +1,19 @@
+#!/bin/sh
+
+# Select a firmware update without splitting filenames or guessing which of
+# several updates the user intended to install.
+find_firmware_update()
+{
+    FIRMWARE_UPDATE_FILE=
+
+    set -- "${1:-/mnt}"/FunKey-*.fwu
+    if [ "$#" -eq 1 ] && [ ! -f "$1" ]; then
+        return 1
+    fi
+    if [ "$#" -ne 1 ]; then
+        return 2
+    fi
+
+    FIRMWARE_UPDATE_FILE=$1
+    return 0
+}
