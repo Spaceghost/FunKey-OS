@@ -7,6 +7,7 @@ SELF=${SELF:-$(basename $0)}
 LOCK_FILE=/var/lock/share.lock
 
 source /usr/local/lib/utils
+source /usr/local/lib/firmware_update
 source usb_gadget
 
 # The USB network interface file
@@ -52,11 +53,16 @@ mount_share () {
     (cd /mnt; mkdir -p "PICO-8" "Pokemon Mini" "Final Burn Alpha 2012" "MAME 2000" "Libretro/cores" "FunKey/.picoarch/system" "Native games" "Applications" "Emulators" "Atari lynx" "Game Boy" "Game Boy Color" "Game Boy Advance" "Game Gear" "Neo Geo Pocket" "NES" "PS1" "Sega Genesis" "Sega Master System" "SNES" "WonderSwan" "PCE-TurboGrafx")
     (mkdir -p "/mnt/FunKey/.retrofe/collections"; cd /mnt/FunKey/.retrofe/collections; mkdir "Atari lynx" "Game Boy" "Game Boy Color" "Game Boy Advance" "Game Gear" "Neo Geo Pocket" "NES" "PS1" "Sega Genesis" "Sega Master System" "SNES" "WonderSwan" "PCE-TurboGrafx" "Libretro" "Native games" "Main")
 
-    # Check if there is a firmware update file
-    if [ -f /mnt/FunKey-*.fwu ]; then
+    # Enter recovery only when there is one unambiguous firmware update.
+    find_firmware_update /mnt
+    update_status=$?
+    if [ ${update_status} -eq 0 ]; then
 	warn "found a firmware update file, going into recovery mode"
 	notif set 0 "^^^^^^^^        UPDATING...^^^^^^^^"
 	recovery_mode
+    elif [ ${update_status} -eq 2 ]; then
+	warn "multiple firmware update files found; refusing to choose one"
+	notif display 10 "      MULTIPLE UPDATE FILES^       KEEP ONLY ONE .FWU"
     fi
 
     # Check if there is a software update file

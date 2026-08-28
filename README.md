@@ -168,12 +168,16 @@ Once the SD card is burnt, insert it into your FunKey S console slot, and
 power it up. Your new system should come up now and start a console on
 the UART0 serial port and display the retro game launcher on the graphical screen.
 
-## How to update the FunKey S firmware
-It is possible to update a FunKey-S over USB:
- - Connect the FunKey S console to your host machine using the USB cable
+## How to update the RG Nano firmware
+It is possible to update an RG Nano over its USB-C data port:
+ - Connect the RG Nano console to your host machine using a USB data cable
  - From the retro-game launcher, press the **ON/OFF** button to access the menu
- - Using the **Up/Down** keys, select the "**MOUNT USB**" screen ad press the "**A**" key twice to mount the FunKey S on your machine as an USB mass storage drive
- - Drag and drop the images/FunKey-rootfs-X.Y.fwu file into it
+ - Using the **Up/Down** keys, select the "**MOUNT USB**" screen and press the "**A**" key twice to mount the RG Nano on your machine as a USB mass-storage drive
+ - Copy exactly one `images/FunKey-rootfs-X.Y.fwu` file to the top level of the shared drive
  - When finished, eject the USB mass storage from your host machine
- - Back on the FunKey S console, press the "**A**" key twice to eject the USB mass storage drive
- - The FunKey S console will automatically detect the firmware update file and proceed with the update before returning to the retro game launcher screen once finished
+ - Back on the RG Nano console, press the "**A**" key twice to unmount the USB mass-storage drive
+ - The RG Nano will automatically detect the firmware update file and install it before returning to the retro-game launcher
+
+If more than one `FunKey-*.fwu` file is present, the RG Nano refuses to choose
+between them. Reconnect the shared drive and keep only the update you intend to
+install. Failed update files are preserved so they can be inspected or replaced.
