@@ -66,6 +66,28 @@ rm -f \
 ln -s ../../bin/busybox "${TARGET_DIR}/usr/bin/bunzip2"
 ln -s ../../bin/busybox "${TARGET_DIR}/usr/bin/bzcat"
 
+# liblzma gives libarchive support for common LZMA-compressed 7z files. Drop
+# the redundant XZ command suite and restore the smaller BusyBox front-ends.
+rm -f \
+	"${TARGET_DIR}/usr/bin/lzma" \
+	"${TARGET_DIR}/usr/bin/lzmadec" \
+	"${TARGET_DIR}/usr/bin/lzmainfo" \
+	"${TARGET_DIR}/usr/bin/unlzma" \
+	"${TARGET_DIR}/usr/bin/unxz" \
+	"${TARGET_DIR}/usr/bin/xz" \
+	"${TARGET_DIR}/usr/bin/xzcat" \
+	"${TARGET_DIR}/usr/bin/xzcmp" \
+	"${TARGET_DIR}/usr/bin/xzdec" \
+	"${TARGET_DIR}/usr/bin/xzdiff" \
+	"${TARGET_DIR}/usr/bin/xzegrep" \
+	"${TARGET_DIR}/usr/bin/xzfgrep" \
+	"${TARGET_DIR}/usr/bin/xzgrep" \
+	"${TARGET_DIR}/usr/bin/xzless" \
+	"${TARGET_DIR}/usr/bin/xzmore"
+for applet in lzma unlzma unxz xz xzcat; do
+	ln -s ../../bin/busybox "${TARGET_DIR}/usr/bin/${applet}"
+done
+
 # Retain the PCRE and libxml2 C libraries used by GLib and libarchive, while
 # dropping their uncalled test/front-end tools and unused C++/POSIX PCRE ABIs.
 rm -f \
