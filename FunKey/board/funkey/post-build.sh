@@ -148,6 +148,21 @@ rm -f \
 	"${TARGET_DIR}/usr/lib/libfmt.so" \
 	"${TARGET_DIR}/usr/lib/libfmt.so.7" \
 	"${TARGET_DIR}/usr/lib/libfmt.so.7.1.3" \
+	"${TARGET_DIR}/usr/lib/libgstapp-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstapp-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstapp-1.0.so.0.1802.0" \
+	"${TARGET_DIR}/usr/lib/libgstfft-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstfft-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstfft-1.0.so.0.1802.0" \
+	"${TARGET_DIR}/usr/lib/libgstriff-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstriff-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstriff-1.0.so.0.1802.0" \
+	"${TARGET_DIR}/usr/lib/libgstrtsp-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstrtsp-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstrtsp-1.0.so.0.1802.0" \
+	"${TARGET_DIR}/usr/lib/libgstsdp-1.0.so" \
+	"${TARGET_DIR}/usr/lib/libgstsdp-1.0.so.0" \
+	"${TARGET_DIR}/usr/lib/libgstsdp-1.0.so.0.1802.0" \
 	"${TARGET_DIR}/usr/lib/liblzo2.so" \
 	"${TARGET_DIR}/usr/lib/liblzo2.so.2" \
 	"${TARGET_DIR}/usr/lib/liblzo2.so.2.0.0" \
