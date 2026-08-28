@@ -100,8 +100,14 @@ This may take a while (~1h30), so consider getting yourself a cup, a glass or a 
 
 ### Result of the build
 After building, you should obtain `FunKey-sdcard-<version>.img` and
-`FunKey-rootfs-<version>.fwu` in the `images` directory. Run
-`make print-version` to show the version embedded in both artifacts.
+`FunKey-rootfs-<version>.fwu` in the `images` directory, together with a
+matching `SHA256SUMS-<version>.txt`. Run `make print-version` to show the
+version embedded in both artifacts. Verify copied or downloaded files with:
+
+```bash
+$ version=$(make -s print-version)
+$ cd images && sha256sum -c "SHA256SUMS-${version}.txt"
+```
 
 ## Build in a container
 
@@ -146,16 +152,17 @@ This may take a while (~1h30), so consider getting yourself a cup, a glass or a 
 <ins>Note</ins>: you will need to have access to the network, since buildroot will download the package sources.
 
 ### Result of the build
-After building, you can copy the versioned SD Card image and firmware update
-file from the container into the host current directory:
+After building, you can copy the versioned SD Card image, firmware update, and
+checksum manifest from the container into the host current directory:
 ```bash
 $ mkdir images
 $ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-sdcard-2.3.0-spaceghost.gCOMMIT.img images/
 $ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-rootfs-2.3.0-spaceghost.gCOMMIT.fwu images/
+$ docker cp funkey-os:/home/funkey/FunKey-OS/images/SHA256SUMS-2.3.0-spaceghost.gCOMMIT.txt images/
 ```
 
 ## How to write to the SD card
-You can copy the bootable `images/sdcard.img` onto an SD card using "dd":
+You can copy the versioned bootable SD Card image onto an SD card using "dd":
 
 ```bash
 $ sudo dd if=images/FunKey-sdcard-2.3.0-spaceghost.gCOMMIT.img of=/dev/sdX
