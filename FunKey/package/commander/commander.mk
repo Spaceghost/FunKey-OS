@@ -26,8 +26,7 @@ define COMMANDER_INSTALL_TARGET_CMDS
 		res/folder.png res/up.png \
 		res/DroidSansFallback.ttf \
 		res/Fiery_Turk.ttf \
-		res/FreeSans.ttf \
-		res/libSDL-1.2.so.0.11.4
+		res/FreeSans.ttf
 endef
 
 define COMMANDER_CREATE_OPK
