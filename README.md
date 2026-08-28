@@ -99,7 +99,9 @@ This may take a while (~1h30), so consider getting yourself a cup, a glass or a 
 <ins>Note</ins>: you will need to have access to the network, since buildroot will download the package sources.
 
 ### Result of the build
-After building, you should obtain the SD Card image `FunKey-sdcard-X.Y.Z.img` and the firmware update file `FunKey-rootfs-X.Y.fwu` in the `images` directory.
+After building, you should obtain `FunKey-sdcard-<version>.img` and
+`FunKey-rootfs-<version>.fwu` in the `images` directory. Run
+`make print-version` to show the version embedded in both artifacts.
 
 ## Build in a container
 
@@ -144,18 +146,19 @@ This may take a while (~1h30), so consider getting yourself a cup, a glass or a 
 <ins>Note</ins>: you will need to have access to the network, since buildroot will download the package sources.
 
 ### Result of the build
-After building, you can copy the SD Card image `sdcard.img` and the firmware update file `FunKey-rootfs-X.Y.fwu` from the container into the host current directory:
+After building, you can copy the versioned SD Card image and firmware update
+file from the container into the host current directory:
 ```bash
 $ mkdir images
-$ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-sdcard-X.Y.Z.img images/
-$ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-rootfs-X.Y.Z.fwu images/
+$ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-sdcard-2.3.0-spaceghost.gCOMMIT.img images/
+$ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-rootfs-2.3.0-spaceghost.gCOMMIT.fwu images/
 ```
 
 ## How to write to the SD card
 You can copy the bootable `images/sdcard.img` onto an SD card using "dd":
 
 ```bash
-$ sudo dd if=images/FunKey-sdcard-X.Y.Z.img of=/dev/sdX
+$ sudo dd if=images/FunKey-sdcard-2.3.0-spaceghost.gCOMMIT.img of=/dev/sdX
 ```
 <ins>Warning</ins>: Please make sure that */dev/sdX* device corresponds to your SD Card, otherwise you may wipe out one of your hard drive partitions!
 
@@ -173,7 +176,7 @@ It is possible to update an RG Nano over its USB-C data port:
  - Connect the RG Nano console to your host machine using a USB data cable
  - From the retro-game launcher, press the **ON/OFF** button to access the menu
  - Using the **Up/Down** keys, select the "**MOUNT USB**" screen and press the "**A**" key twice to mount the RG Nano on your machine as a USB mass-storage drive
- - Copy exactly one `images/FunKey-rootfs-X.Y.fwu` file to the top level of the shared drive
+ - Copy exactly one `images/FunKey-rootfs-<version>.fwu` file to the top level of the shared drive
  - When finished, eject the USB mass storage from your host machine
  - Back on the RG Nano console, press the "**A**" key twice to unmount the USB mass-storage drive
  - The RG Nano will automatically detect the firmware update file and install it before returning to the retro-game launcher
