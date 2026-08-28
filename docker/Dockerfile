@@ -1,5 +1,8 @@
 FROM debian:buster-20200514-slim
 
+ARG FUNKEY_OS_REPOSITORY=https://github.com/Spaceghost/FunKey-OS.git
+ARG FUNKEY_OS_REF=docs/rg-nano-fork-identity
+
 LABEL \
 	maintainer="Michel Stempin <michel.stempin@funkey-project.com>" \
 	vendor="FunKey Project" \
@@ -91,8 +94,9 @@ RUN \
 	usermod -a -G sudo funkey && \
 	echo "funkey:funkey" | chpasswd && \
 	#
-	# Clone the FunKey-OS repository
-	git clone https://github.com/DrUm78/FunKey-OS.git /home/funkey/FunKey-OS && \
+	# Clone the requested branch of the RG Nano fork
+	git clone --branch "${FUNKEY_OS_REF}" --single-branch \
+		"${FUNKEY_OS_REPOSITORY}" /home/funkey/FunKey-OS && \
 	#
 	# Set file ownership
 	chown -R funkey:funkey /home/funkey
@@ -119,4 +123,4 @@ ENV \
 # 	"/home/funkey/FunKey-OS/FunKey/output/build", \
 # 	"/home/funkey/FunKey-OS/FunKey/output/target"]
 
-CMD ["/usr/bin/make", "sdk", "all", "-C", "/home/funkey/FunKey-OS"]
+CMD ["/bin/sh", "-c", "exec make -j\"$(nproc)\" all -C /home/funkey/FunKey-OS"]

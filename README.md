@@ -1,17 +1,24 @@
-<!-- ![FunKey OS Build](https://github.com/FunKey-Project/FunKey-OS/workflows/FunKey-OS%20Build/badge.svg) -->
-# FunKey OS
+# FunKey OS for RG Nano
 
 ## Intro
-This repository contains all the sources required to build FunKey OS, the Open-Source firmware at the heart of the [FunKey S retro-gaming console](https://www.funkey-project.com/).
+This is Spaceghost's RG Nano fork of
+[DrUm78/FunKey-OS](https://github.com/DrUm78/FunKey-OS). It contains the
+bootloader, Linux system, launcher, and emulator sources required to build
+FunKey OS for the Anbernic RG Nano while preserving the original project's
+history and licensing.
 
-As the FunKey-S console is based on a sophisticated [Allwinner V3s ARM Cortex-A7 1.2GHz CPU](http://www.allwinnertech.com/index.php?c=product&a=index&id=38), an Operating System is mandatory in order to access all the hardware resources without re-inventing the wheel.
+The RG Nano uses an Allwinner V3s ARM Cortex-A7 processor. FunKey OS provides
+the Linux-based hardware support and compact gaming environment used by this
+port.
 
 FunKey OS is based on Linux, and is built from scratch using the [buildroot](http://nightly.buildroot.org/) tool that simplifies and automates the process of building a complete Linux system for an embedded system like this.
 
 Technically, Funkey OS is a [buildroot (v2) based external tree](https://buildroot.org/downloads/manual/manual.html#outside-br-custom) for building the bootloader, the Linux kernel and user utilities, as well as the optimized retro-game launcher and console emulators.
 
 ## Build host requirements
-Even if the resulting disk image and firmware update files are relatively small (202 MB and 55MB, respectively), the size of the corresponding sources and the compilation by-products tend to be rather large, such that an available disk space of at least 12GB is required during the build.
+The resulting SD Card image is about 451 MiB and the compressed firmware update
+is about 127 MiB. Sources and intermediate build products are much larger; keep
+at least 20 GiB free for a complete build.
 
 And even if the resulting FunKey OS boots in less than 5s, it still requires a considerable amount of time to compile: please account for 1 1/2 hour on a modern multi-core CPU with SSD drives and a decent Internet bandwidth.
 
@@ -79,21 +86,24 @@ $ sudo apt install bash bc binutils build-essential bzip2 ca-certificates cpio c
 When using either physical or virtual Linux machines, you must clone the FunKey OS repository from Github (here we place it into a `FunKey-OS` directory):
 
 ```bash
-$ git clone https://github.com/DrUm78/FunKey-OS.git FunKey-OS
-```
-
-Then enter into the created directory:
-
-```bash
+$ git clone https://github.com/Spaceghost/FunKey-OS.git FunKey-OS
 $ cd FunKey-OS
+$ git switch docs/rg-nano-fork-identity
 ```
+
+`docs/rg-nano-fork-identity` contains the current software-validated
+development stack. Development and optimization work is published in named
+branches before it is integrated into `rg-nano-next`; physical RG Nano
+validation is still required before treating development artifacts as a
+release.
 
 ### Build the disk image & firmware update files
-You may now build your FunKey with:
+Build the RG Nano SD image, update file, and checksums with:
 
 ```bash
-$ make sdk all
+$ make -j"$(nproc)" all
 ```
+Run `make sdk` separately only if you also need the cross-development SDK.
 This may take a while (~1h30), so consider getting yourself a cup, a glass or a bottle of your favorite beverage ;-)
 
 <ins>Note</ins>: you will need to have access to the network, since buildroot will download the package sources.
@@ -115,27 +125,24 @@ $ cd images && sha256sum -c "SHA256SUMS-${version}.txt"
 When using a Docker container, all the prerequisites are automatically installed.
 
 ### How to get the sources
-When using a Docker container, you must first create a new directory (here we create a `FunKey-OS` directory) and get the FunKey OS [Dockerfile](https://github.com/DrUm78/FunKey-OS/blob/master/docker/Dockerfile):
+Clone the fork and select the RG Nano branch as described above. Build the
+included Dockerfile from the repository root; the branch passed to Docker is
+the branch it will clone and compile:
 ```bash
-$ mkdir FunKey-OS
-$ cd FunKey-OS
-$ wget https://raw.githubusercontent.com/DrUm78/FunKey-OS/master/docker/Dockerfile -o Dockerfile
-```
-
-You must then build the docker image (don't forget the final dot!):
-```bash
-$ docker build -t DrUm78/funkey-os .
+$ docker build -f docker/Dockerfile \
+    --build-arg FUNKEY_OS_REF="$(git branch --show-current)" \
+    -t spaceghost/funkey-os .
 ```
 
 ### Build the disk image & firmware update files
-You may now build your FunKey with:
+Build the firmware artifacts with:
 ```bash
-$ docker run --name funkey-os DrUm78/funkey-os
+$ docker run --name funkey-os spaceghost/funkey-os
 ```
 
 Or alternatively, you can run it in the background with:
 ```bash
-$ docker run -d --name funkey-os DrUm78/funkey-os
+$ docker run -d --name funkey-os spaceghost/funkey-os
 ```
 
 If you launch it in the background, you can still follow what is going on with either:
@@ -156,16 +163,15 @@ After building, you can copy the versioned SD Card image, firmware update, and
 checksum manifest from the container into the host current directory:
 ```bash
 $ mkdir images
-$ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-sdcard-2.3.0-spaceghost.gCOMMIT.img images/
-$ docker cp funkey-os:/home/funkey/FunKey-OS/images/FunKey-rootfs-2.3.0-spaceghost.gCOMMIT.fwu images/
-$ docker cp funkey-os:/home/funkey/FunKey-OS/images/SHA256SUMS-2.3.0-spaceghost.gCOMMIT.txt images/
+$ docker cp funkey-os:/home/funkey/FunKey-OS/images/. images/
 ```
 
 ## How to write to the SD card
 You can copy the versioned bootable SD Card image onto an SD card using "dd":
 
 ```bash
-$ sudo dd if=images/FunKey-sdcard-2.3.0-spaceghost.gCOMMIT.img of=/dev/sdX
+$ version=$(make -s print-version)
+$ sudo dd if="images/FunKey-sdcard-${version}.img" of=/dev/sdX
 ```
 <ins>Warning</ins>: Please make sure that */dev/sdX* device corresponds to your SD Card, otherwise you may wipe out one of your hard drive partitions!
 
@@ -174,7 +180,7 @@ to the SD card safely and on any platform:
 
 https://www.balena.io/etcher/
 
-Once the SD card is burnt, insert it into your FunKey S console slot, and
+Once the SD card is written, insert it into your RG Nano, and
 power it up. Your new system should come up now and start a console on
 the UART0 serial port and display the retro game launcher on the graphical screen.
 
