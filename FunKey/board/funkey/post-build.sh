@@ -34,6 +34,20 @@ rm -f \
 rmdir "${TARGET_DIR}/usr/lib64/sa" 2>/dev/null || true
 rmdir "${TARGET_DIR}/etc/sysconfig" 2>/dev/null || true
 
+# Keep GLib and GStreamer runtime libraries, but omit their uncalled target-side
+# administration, debugging, and build-time helpers from production firmware.
+rm -f \
+	"${TARGET_DIR}/usr/bin/gapplication" \
+	"${TARGET_DIR}/usr/bin/gdbus" \
+	"${TARGET_DIR}/usr/bin/gio" \
+	"${TARGET_DIR}/usr/bin/gio-querymodules" \
+	"${TARGET_DIR}/usr/bin/gresource" \
+	"${TARGET_DIR}/usr/bin/gsettings"
+rm -rf \
+	"${TARGET_DIR}/usr/share/gettext/its" \
+	"${TARGET_DIR}/usr/share/glib-2.0/valgrind" \
+	"${TARGET_DIR}/usr/share/gstreamer-1.0/gdb"
+
 # Remove dhcp lib dir and link to /tmp
 rm -rf "${TARGET_DIR}/var/lib/dhcp"
 ln -s /tmp "${TARGET_DIR}/var/lib/dhcp"
