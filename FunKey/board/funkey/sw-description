@@ -1,6 +1,6 @@
 software =
 {
-	version = "2.2.0";
+	version = "@FUNKEY_VERSION@";
 
 	hardware-compatibility = [ "#RE:^Rev\.[D-F]$" ];
 

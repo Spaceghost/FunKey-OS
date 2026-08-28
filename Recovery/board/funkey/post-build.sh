@@ -2,6 +2,8 @@
 
 set -e
 
+printf 'Recovery\t%s\n' "${FUNKEY_VERSION:-2.3.0}" > "${TARGET_DIR}/etc/sw-versions"
+
 # Add local path to init scripts
 path_line='export PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin'
 for script in "${TARGET_DIR}/etc/init.d/rcK" "${TARGET_DIR}/etc/init.d/rcS"; do

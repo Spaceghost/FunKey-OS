@@ -22,7 +22,10 @@ BR = make -C buildroot
 
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
 E2FSPROGS_FAKE_TIME ?= $(SOURCE_DATE_EPOCH)
-export SOURCE_DATE_EPOCH E2FSPROGS_FAKE_TIME
+FUNKEY_GIT_DIRTY = $(shell test -z "$$(git status --porcelain --untracked-files=normal 2>/dev/null)" || printf '%s' -dirty)
+FUNKEY_GIT_REV ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)$(FUNKEY_GIT_DIRTY)
+FUNKEY_VERSION ?= 2.3.0-spaceghost.g$(FUNKEY_GIT_REV)
+export SOURCE_DATE_EPOCH E2FSPROGS_FAKE_TIME FUNKEY_VERSION
 
 # Strip quotes and then whitespaces
 qstrip = $(strip $(subst ",,$(1)))
@@ -33,12 +36,15 @@ MESSAGE = echo "$(shell date +%Y-%m-%dT%H:%M:%S) $(TERM_BOLD)\#\#\# $(call qstri
 TERM_BOLD := $(shell tput smso 2>/dev/null)
 TERM_RESET := $(shell tput rmso 2>/dev/null)
 
-.PHONY: fun source image update defconfig clean distclean zig-cc zig-restore zig-all
+.PHONY: fun source image update defconfig clean distclean print-version zig-cc zig-restore zig-all
 
 .IGNORE: _Makefile_
 
 all: image update
 	@:
+
+print-version:
+	@printf '%s\n' '$(FUNKEY_VERSION)'
 
 zig-cc: FunKey/toolchain Recovery/toolchain
 	@./scripts/install-zig-cc FunKey/output
@@ -121,7 +127,7 @@ image: fun
 	@./Recovery/output/host/bin/genimage --loglevel 0 --inputpath . \
 		--rootpath root-image --tmppath tmp-image
 	@rm -rf root-image tmp-image
-	@mv images/sdcard.img images/FunKey-sdcard-DrUm78_RG_Nano.img
+	@mv images/sdcard.img images/FunKey-sdcard-$(FUNKEY_VERSION).img
 
 image-prod: fun
 	@$(call MESSAGE,"Creating disk image")
@@ -130,13 +136,14 @@ image-prod: fun
 	@./Recovery/output/host/bin/genimage --loglevel 0 --config "genimage-prod.cfg" --inputpath . \
 		--rootpath root-image-prod --tmppath tmp-image-prod
 	@rm -rf root-image-prod tmp-image-prod
-	@mv images/sdcard-prod.img images/FunKey-sdcard-prod-DrUm78_RG_Nano.img
+	@mv images/sdcard-prod.img images/FunKey-sdcard-prod-$(FUNKEY_VERSION).img
 
 update: fun
 	@$(call MESSAGE,"Creating update file")
 	@rm -rf tmp-update
 	@mkdir -p tmp-update
-	@cp FunKey/board/funkey/sw-description tmp-update/
+	@sed 's/@FUNKEY_VERSION@/$(FUNKEY_VERSION)/g' \
+		FunKey/board/funkey/sw-description > tmp-update/sw-description
 	@cp FunKey/board/funkey/update_partition tmp-update/
 	@cd FunKey/output/images && \
 	rm -f rootfs.ext2.gz && \
@@ -146,7 +153,7 @@ update: fun
 	@cd tmp-update && \
 	echo sw-description rootfs.ext2.gz update_partition | \
 	tr " " "\n" | \
-	cpio --reproducible --owner=0:0 -o -H crc --quiet > ../images/FunKey-rootfs-DrUm78_RG_Nano.fwu
+	cpio --reproducible --owner=0:0 -o -H crc --quiet > ../images/FunKey-rootfs-$(FUNKEY_VERSION).fwu
 	@rm -rf tmp-update
 
 defconfig:
