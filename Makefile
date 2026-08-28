@@ -36,12 +36,21 @@ MESSAGE = echo "$(shell date +%Y-%m-%dT%H:%M:%S) $(TERM_BOLD)\#\#\# $(call qstri
 TERM_BOLD := $(shell tput smso 2>/dev/null)
 TERM_RESET := $(shell tput rmso 2>/dev/null)
 
-.PHONY: fun source image update defconfig clean distclean print-version zig-cc zig-restore zig-all
+.PHONY: fun source image update checksums defconfig clean distclean print-version zig-cc zig-restore zig-all
 
 .IGNORE: _Makefile_
 
-all: image update
+all: checksums
 	@:
+
+checksums: image update
+	@$(call MESSAGE,"Creating artifact checksums")
+	@cd images && \
+	sha256sum \
+		FunKey-rootfs-$(FUNKEY_VERSION).fwu \
+		FunKey-sdcard-$(FUNKEY_VERSION).img \
+		> SHA256SUMS-$(FUNKEY_VERSION).txt.tmp && \
+	mv SHA256SUMS-$(FUNKEY_VERSION).txt.tmp SHA256SUMS-$(FUNKEY_VERSION).txt
 
 print-version:
 	@printf '%s\n' '$(FUNKEY_VERSION)'
