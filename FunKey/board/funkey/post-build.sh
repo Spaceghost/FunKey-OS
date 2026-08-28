@@ -48,6 +48,24 @@ rm -rf \
 	"${TARGET_DIR}/usr/share/glib-2.0/valgrind" \
 	"${TARGET_DIR}/usr/share/gstreamer-1.0/gdb"
 
+# libbz2 is required by runtime libraries, but its standalone compressor,
+# recovery tool, and shell wrappers are unused. BusyBox already provides the
+# two decompression applets needed by tar and interactive archive extraction.
+rm -f \
+	"${TARGET_DIR}/usr/bin/bunzip2" \
+	"${TARGET_DIR}/usr/bin/bzcat" \
+	"${TARGET_DIR}/usr/bin/bzcmp" \
+	"${TARGET_DIR}/usr/bin/bzdiff" \
+	"${TARGET_DIR}/usr/bin/bzegrep" \
+	"${TARGET_DIR}/usr/bin/bzfgrep" \
+	"${TARGET_DIR}/usr/bin/bzgrep" \
+	"${TARGET_DIR}/usr/bin/bzip2" \
+	"${TARGET_DIR}/usr/bin/bzip2recover" \
+	"${TARGET_DIR}/usr/bin/bzless" \
+	"${TARGET_DIR}/usr/bin/bzmore"
+ln -s ../../bin/busybox "${TARGET_DIR}/usr/bin/bunzip2"
+ln -s ../../bin/busybox "${TARGET_DIR}/usr/bin/bzcat"
+
 # Remove dhcp lib dir and link to /tmp
 rm -rf "${TARGET_DIR}/var/lib/dhcp"
 ln -s /tmp "${TARGET_DIR}/var/lib/dhcp"
