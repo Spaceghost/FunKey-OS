@@ -22,6 +22,7 @@ RUN \
 	make \
 	binutils \
 	build-essential \
+	cmake \
 	gcc \
 	g++ \
 	#bash \
