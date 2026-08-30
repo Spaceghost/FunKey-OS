@@ -1,0 +1,31 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] lib: provide stpcpy for LLVM string folding
+
+LLVM may fold a strcpy followed by a length calculation into stpcpy. This
+older kernel does not provide that freestanding string primitive.
+
+---
+ lib/string.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/lib/string.c b/lib/string.c
+--- a/lib/string.c
++++ b/lib/string.c
+@@ -1043,5 +1043,15 @@ int bcmp(const void *left, const void *right, size_t len)
+ int bcmp(const void *left, const void *right, size_t len)
+ {
+ 	return memcmp(left, right, len);
+ }
+ EXPORT_SYMBOL(bcmp);
++
++char *stpcpy(char *dest, const char *src)
++{
++	while ((*dest = *src) != '\0') {
++		dest++;
++		src++;
++	}
++	return dest;
++}
++EXPORT_SYMBOL(stpcpy);
+-- 
+2.30.2

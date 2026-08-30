@@ -47,8 +47,13 @@ do_postinst()
     # Copy OPKs
     cp -r ${root_mount}/usr/local/share/OPKs/* /mnt
 
-    # Copy freeware games and other necessary mnt files
-    unzip -q -n ${root_mount}/usr/local/share/freeware_games.zip -d /mnt/
+    # Custom firmware may inject the optional freeware pack. Public updates
+    # leave existing games alone instead of carrying an unchanged pack.
+    if [ -f ${root_mount}/usr/local/share/freeware_games.zip ]; then
+        unzip -q -n ${root_mount}/usr/local/share/freeware_games.zip -d /mnt/
+    fi
+
+    # Copy the files required by the launcher and emulators.
     unzip -q -n ${root_mount}/usr/local/share/funkey_files.zip -d /mnt/
 
     # Remove previous OPKs for default emulators
@@ -74,10 +79,11 @@ do_postinst()
     #####################
     # Erase update file #
     #####################
-    for file in $(ls /mnt/FunKey-*.fwu); do
+    set -- /mnt/FunKey-*.fwu
+    if [ "$#" -eq 1 ] && [ -f "$1" ]; then
         notif_set 0 " 4/4 ERASE UPDATE FILE^DO NOT TURN OFF THE CONSOLE"
-        rm -f "${file}"
-    done
+        rm -f "$1"
+    fi
     exit 0
 }
 

@@ -8,7 +8,6 @@ config BR2_PACKAGE_RETROFE
 	select BR2_PACKAGE_SDL_IMAGE
 	select BR2_PACKAGE_SDL_MIXER
 	select BR2_PACKAGE_SDL_TTF
-	select BR2_PACKAGE_SQLITE
 	select BR2_PACKAGE_ZLIB
 	help
 	  RetroFE is a front-end, which can be used as a graphical

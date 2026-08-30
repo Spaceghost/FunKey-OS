@@ -18,13 +18,19 @@ define GMU_PREPARE_TOOLCHAIN_ALIASES
 	for tool in $(HOST_DIR)/bin/arm-linux-*; do \
 		[ -e "$$tool" ] || continue; \
 		name=$${tool##*/arm-linux-}; \
-		ln -s "$$tool" "$(@D)/toolchain/bin/arm-funkey-linux-musleabihf-$$name"; \
+		printf '#!/bin/sh\nexec "%s" "$$@"\n' "$$tool" \
+			> "$(@D)/toolchain/bin/arm-funkey-linux-musleabihf-$$name"; \
+		chmod +x "$(@D)/toolchain/bin/arm-funkey-linux-musleabihf-$$name"; \
 	done
 endef
 
 define GMU_BUILD_CMDS
 	$(GMU_PREPARE_TOOLCHAIN_ALIASES)
 	(cd $(@D); \
+	sed -i \
+		-e 's|/opt/FunKey-sdk/bin|$(@D)/toolchain/bin|g' \
+		-e 's|/opt/FunKey-sdk/arm-funkey-linux-musleabihf/sysroot|$(STAGING_DIR)|g' \
+		funkey.mk; \
 	sed -i -e 's|rm -rf|#rm -rf|g' package; \
 	sed -i -e 's|make -f Makefile.funkey clean|#make -f Makefile.funkey clean|g' package; \
 	chmod +x package; \

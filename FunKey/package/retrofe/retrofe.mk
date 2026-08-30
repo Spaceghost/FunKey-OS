@@ -7,7 +7,8 @@
 RETROFE_VERSION = RetroFE-FunKey-1.1.4
 RETROFE_SITE_METHOD = git
 RETROFE_SITE = https://github.com/FunKey-Project/RetroFE.git
-RETROFE_DEPENDENCIES = gstreamer1 gst1-plugins-base sdl sdl_image sdl_mixer sdl_sound sdl_ttf libglib2 sqlite zlib
+# RetroFE compiles its bundled SQLite amalgamation into the executable.
+RETROFE_DEPENDENCIES = gstreamer1 gst1-plugins-base sdl sdl_image sdl_mixer sdl_ttf libglib2 zlib
 RETROFE_LICENSE = GPL-3.0
 RETROFE_LICENSE_FILES = LICENSE.txt
 

@@ -1,0 +1,22 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] ARM: use unified syntax for range-check subtract
+
+LLVM's assembler requires the flag-setting suffix before the condition code.
+The instruction is otherwise identical.
+
+---
+ arch/arm/include/asm/uaccess.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm/include/asm/uaccess.h b/arch/arm/include/asm/uaccess.h
+index 74b17d0..8196752 100644
+--- a/arch/arm/include/asm/uaccess.h
++++ b/arch/arm/include/asm/uaccess.h
+@@ -78,6 +78,6 @@
+ #define __range_ok(addr, size) ({ \
+ 	unsigned long flag, roksum; \
+ 	__chk_user_ptr(addr);	\
+-	__asm__("adds %1, %2, %3; sbcccs %1, %1, %0; movcc %0, #0" \
++	__asm__("adds %1, %2, %3; sbcscc %1, %1, %0; movcc %0, #0" \
+ 		: "=&r" (flag), "=&r" (roksum) \
+ 		: "r" (addr), "Ir" (size), "0" (current_thread_info()->addr_limit) \

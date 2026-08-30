@@ -3,6 +3,7 @@
 THIS=$(basename $0)
 
 source /usr/local/lib/utils
+source /usr/local/lib/firmware_update
 
 case "$1" in
     start)
@@ -10,18 +11,22 @@ case "$1" in
 	if [ "${keys}" != "0xF83F" ]; then
 
 	    # Automatic firmware update requested
-	    updates=$(ls /mnt/FunKey-*.fwu 2>/dev/null)
-	    if [ "x${updates}" = "x" ]; then
+	    find_firmware_update /mnt
+	    update_status=$?
+	    if [ ${update_status} -eq 1 ]; then
 		menu &
 		exit 1
 	    fi
-	    for file in ${updates} ; do
-		swupdate -i "${file}"
-		if [ $? -ne 0 ]; then
-	            notif display 10 "         CORRUPTED^        UPDATE FILE"
-		    rm -f "${file}"
-		fi
-	    done
+	    if [ ${update_status} -eq 2 ]; then
+		notif display 10 "      MULTIPLE UPDATE FILES^       KEEP ONLY ONE .FWU"
+		menu &
+		exit 1
+	    fi
+	    if ! install_firmware_update "${FIRMWARE_UPDATE_FILE}"; then
+		notif display 10 "         CORRUPTED^        UPDATE FILE"
+		menu &
+		exit 1
+	    fi
 	    notif set 0 "^^^^^^^^         RESTARTING...^^^^^^^^"
 	    normal_mode
 	else

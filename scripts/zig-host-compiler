@@ -1,0 +1,68 @@
+#!/bin/bash
+set -eu
+
+driver=cc
+case "$0" in
+	*++*|*cxx*) driver=c++ ;;
+esac
+
+if [ "$#" -eq 1 ] && [ "$1" = "-v" ]; then
+	zig "$driver" -v
+	printf '%s\n' 'gcc version 9.0.0 (Zig cc Buildroot compatibility)' >&2
+	exit 0
+fi
+
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+	zig "$driver" --version
+	printf '%s\n' 'zig-host compiler compatibility (9.0.0)'
+	exit 0
+fi
+
+if [ "$#" -eq 1 ] && [ "$1" = "-print-multi-os-directory" ]; then
+	printf '%s\n' '.'
+	exit 0
+fi
+
+# Meson 0.56 recognizes a fixed set of legacy linker version banners.
+# Its probe asks the compiler driver to forward --version to the linker.
+for arg in "$@"; do
+	if [ "$arg" = "-Wl,--version" ]; then
+		printf '%s\n' 'GNU ld (Zig ld compatibility) 2.35'
+		exit 0
+	fi
+done
+
+# Old libtool releases pass GNU ld scripts as bare compiler-driver inputs.
+# GCC recognizes those implicitly, while Zig/Clang requires an explicit -T.
+args=()
+boundary_section_link=false
+for arg in "$@"; do
+	case "$arg" in
+		*imagetool.o|*file2alias.o) boundary_section_link=true; args+=("$arg") ;;
+		-Wl,-stats) ;;
+		-Wl,-h*)
+			args+=("-Wl,-soname" "-Wl,${arg#-Wl,-h}") ;;
+		-Wl,--version-script=*)
+			args+=("-Wl,--undefined-version" "-Wl,--version-script" "-Wl,${arg#-Wl,--version-script=}") ;;
+		-Wl,--version-script)
+			args+=("-Wl,--undefined-version" "$arg") ;;
+		-Wl,*,-stats,-lc) args+=("${arg%,-stats,-lc}" "-lc") ;;
+		-Wl,*,-stats*) args+=("${arg//,-stats/}") ;;
+		-Wl,*.lds) args+=("-Wl,-T,${arg#-Wl,}") ;;
+		*.lds) args+=("-Wl,-T,$arg") ;;
+		*) args+=("$arg") ;;
+	esac
+done
+
+# Older U-Boot image tools and Linux modpost rely on GNU ld retaining input
+# sections that synthesize boundary symbols. Disable section GC only for those
+# host-tool links to give LLD the same behavior.
+if $boundary_section_link; then
+	args+=("-Wl,--no-gc-sections")
+fi
+
+exec zig "$driver" "${args[@]}" \
+	-Wno-error=date-time \
+	-Wno-error=incompatible-function-pointer-types \
+	-Wno-error=implicit-function-declaration \
+	-Wno-error=bitwise-instead-of-logical

@@ -1,3 +1,4 @@
 #!/bin/sh
 
-#DROPBEAR_ARGS="-b /etc/issue.net"
+# Permit the deliberately passwordless root account on the USB-only network.
+DROPBEAR_ARGS="-B"

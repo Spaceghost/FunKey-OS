@@ -9,9 +9,15 @@ source /usr/local/lib/utils
 # The composite gadget directory
 GADGET=/sys/kernel/config/usb_gadget/FunKey
 
-# Check if Ethernet over USB network is requested
-[ ! -f /mnt/usbnet ]
-USBNET=${?}
+# Select independently which USB functions the gadget exposes.
+test -r /etc/default/usb-gadget && source /etc/default/usb-gadget
+USB_NETWORK=${USB_NETWORK:-auto}
+USB_MASS_STORAGE=${USB_MASS_STORAGE:-1}
+case "${USB_NETWORK}" in
+    always) USBNET=1 ;;
+    never) USBNET=0 ;;
+    *) [ ! -f /mnt/usbnet ]; USBNET=${?} ;;
+esac
 
 # Check if Android Debug Bridge is requested
 [ ! -f /mnt/adb ]
@@ -63,7 +69,7 @@ init_usb_gadget() {
     mkdir ${GADGET}/configs/FunKey.1
     mkdir ${GADGET}/configs/FunKey.1/strings/0x409
     test ${USBNET} -eq 1 && mkdir ${GADGET}/functions/rndis.usb0
-    mkdir ${GADGET}/functions/mass_storage.mmcblk0p4
+    test ${USB_MASS_STORAGE} -eq 1 && mkdir ${GADGET}/functions/mass_storage.mmcblk0p4
 
     # USB2
     echo "0x0200" > ${GADGET}/bcdUSB
@@ -83,7 +89,7 @@ init_usb_gadget() {
 
     # Device String Descriptiors
     echo "FunKey" > ${GADGET}/strings/0x409/manufacturer
-    echo "FunKey S" > ${GADGET}/strings/0x409/product
+    echo "RG Nano" > ${GADGET}/strings/0x409/product
     echo ${SERIAL} > ${GADGET}/strings/0x409/serialnumber
 
     # Turn on "OS Descriptors" support for RNDIS
@@ -99,8 +105,10 @@ init_usb_gadget() {
     echo 500 > ${GADGET}/configs/FunKey.1/MaxPower
 
     # Configuration String Descriptors
-    if [ ${USBNET} -eq 1 ]; then
+    if [ ${USBNET} -eq 1 ] && [ ${USB_MASS_STORAGE} -eq 1 ]; then
 	echo "Mass Storage + RNDIS" > ${GADGET}/configs/FunKey.1/strings/0x409/configuration
+    elif [ ${USBNET} -eq 1 ]; then
+	echo "RNDIS Network" > ${GADGET}/configs/FunKey.1/strings/0x409/configuration
     else
 	echo "Mass Storage" > ${GADGET}/configs/FunKey.1/strings/0x409/configuration
     fi
@@ -128,9 +136,10 @@ init_usb_gadget() {
 	# Add the "Label" Extended Property
 	mkdir ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label
 	echo 1 > ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label/type
-	echo "FunKey S Device" > ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label/data
+	echo "RG Nano Device" > ${GADGET}/functions/rndis.usb0/os_desc/interface.rndis/Label/data
     fi
 
+    if [ ${USB_MASS_STORAGE} -eq 1 ]; then
     # Mass Storage Function
 
     # Backing Store file
@@ -149,7 +158,8 @@ init_usb_gadget() {
     echo 1 > ${GADGET}/functions/mass_storage.mmcblk0p4/lun.0/removable
 
     # Inquiry String
-    echo "FunKey S Shared Disk" > ${GADGET}/functions/mass_storage.mmcblk0p4/lun.0/inquiry_string
+    echo "RG Nano Shared Disk" > ${GADGET}/functions/mass_storage.mmcblk0p4/lun.0/inquiry_string
+    fi
 
     if [ ${USBNET} -eq 1 ]; then
 
@@ -167,8 +177,10 @@ init_usb_gadget() {
 	echo > ${GADGET}/UDC
     fi
 
+    if [ ${USB_MASS_STORAGE} -eq 1 ]; then
     # Add the Mass Storage function to the FunKey.1 configuration
     ln -s ${GADGET}/functions/mass_storage.mmcblk0p4 ${GADGET}/configs/FunKey.1
+    fi
 
     # Each interface specifies its own class code
     echo "0x00" > ${GADGET}/bDeviceClass
@@ -185,7 +197,7 @@ deinit_usb_gadget() {
     echo > ${GADGET}/UDC
 
     # Remove functions from configurations
-    rm ${GADGET}/configs/FunKey.1/mass_storage.mmcblk0p4
+    test ${USB_MASS_STORAGE} -eq 0 || rm ${GADGET}/configs/FunKey.1/mass_storage.mmcblk0p4
     if [ ${USBNET} -eq 1 ]; then
 	rm ${GADGET}/configs/FunKey.1/rndis.usb0
     fi
@@ -208,7 +220,7 @@ deinit_usb_gadget() {
     fi
 
     # Remove functions
-    rmdir ${GADGET}/functions/mass_storage.mmcblk0p4
+    test ${USB_MASS_STORAGE} -eq 0 || rmdir ${GADGET}/functions/mass_storage.mmcblk0p4
     if [ ${USBNET} -eq 1 ]; then
 	rmdir ${GADGET}/functions/rndis.usb0
     fi

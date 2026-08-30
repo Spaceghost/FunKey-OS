@@ -1,0 +1,4 @@
+# Recovery always enables USB networking unless explicitly overridden.
+USB_NETWORK=always
+# Keep the traditional shared-disk function in the composite USB profile.
+USB_MASS_STORAGE=1
