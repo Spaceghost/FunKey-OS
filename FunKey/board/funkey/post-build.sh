@@ -191,6 +191,13 @@ if [ -e "${TARGET_DIR}/etc/init.d/S50dropbear" ]; then
 	mv "${TARGET_DIR}/etc/init.d/S50dropbear" "${TARGET_DIR}/etc/init.d/S42dropbear"
 fi
 
+# Theme authors left alternate artwork and XML editor backups alongside the
+# active assets. RetroFE never selects these *_BAK files; omit them from the
+# immutable rootfs while leaving the source copies available to developers.
+find "${TARGET_DIR}/usr/games" -type f \
+	\( -iname '*_bak.*' -o -iname '*-bak.*' -o -iname '*.bak' \) \
+	-delete
+
 # Store byte-identical static assets only once while preserving every path.
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python3 "${script_dir}/../../../scripts/deduplicate-rootfs-assets" "${TARGET_DIR}"

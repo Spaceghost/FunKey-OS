@@ -1,0 +1,40 @@
+#!/bin/sh
+
+set -u
+
+SELF=${SELF:-$(basename "$0")}
+. /usr/local/lib/utils
+. /usr/local/lib/firmware_update
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 /mnt/FunKey-<version>.fwu" >&2
+    exit 2
+fi
+
+requested=$1
+case "$requested" in
+    /mnt/FunKey-*.fwu) ;;
+    *) die 2 "update must be a FunKey-*.fwu file in /mnt" ;;
+esac
+
+[ -f "$requested" ] || die 2 "update is not a regular file: $requested"
+grep -qs '[[:space:]]/mnt[[:space:]]' /proc/mounts || \
+    die 2 "/mnt is not mounted locally"
+
+# Recovery's automatic installer intentionally accepts exactly one update.
+# Apply the same rule here so a network-triggered reboot can never select a
+# different archive from the one the operator requested.
+find_firmware_update /mnt
+selection_status=$?
+if [ "$selection_status" -eq 2 ]; then
+    die 2 "multiple FunKey-*.fwu files found in /mnt; keep exactly one"
+fi
+if [ "$selection_status" -ne 0 ] || [ "$FIRMWARE_UPDATE_FILE" != "$requested" ]; then
+    die 2 "requested update is not the sole firmware archive in /mnt"
+fi
+
+info "validating complete firmware archive before entering Recovery"
+validate_firmware_update "$requested" || die 3 "firmware validation failed"
+sync
+info "firmware validated; rebooting into Recovery for installation"
+exec recovery_mode

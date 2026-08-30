@@ -1,0 +1,22 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] build: link the fixed-address image without PIE
+
+The image is placed at CONFIG_SYS_TEXT_BASE by its linker script. LLD rejects
+the legacy absolute relocations when -pie is also present, so omit that
+redundant mode from the final link.
+
+---
+ Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 71f62a8..d64130a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1726,3 +1726,3 @@ quiet_cmd_u-boot__ ?= LD      $@
+       cmd_u-boot__ ?= $(CC) -nostdlib $(KBUILD_LDFLAGS) \
+-      $(filter-out -Ttext $(CONFIG_SYS_TEXT_BASE),$(LDFLAGS_u-boot)) \
++      $(filter-out -pie -Ttext $(CONFIG_SYS_TEXT_BASE),$(LDFLAGS_u-boot)) \
+       -o $@ -Wl,-T -Wl,u-boot.lds $(u-boot-init)               \
+-- 
+2.30.2

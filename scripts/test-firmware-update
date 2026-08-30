@@ -47,6 +47,10 @@ install_firmware_update "$update" || fail "valid preflight blocked installation"
 [ "$calls" = "-c -i $update|-i $update" ] || fail "preflight did not precede installation"
 
 calls=
+validate_firmware_update "$update" || fail "standalone preflight rejected valid update"
+[ "$calls" = "-c -i $update" ] || fail "standalone preflight used the wrong SWUpdate mode"
+
+calls=
 swupdate()
 {
     calls="${calls}${calls:+|}$*"
