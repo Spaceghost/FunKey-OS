@@ -63,6 +63,17 @@ rm -rf \
 	"${TARGET_DIR}/usr/share/glib-2.0/valgrind" \
 	"${TARGET_DIR}/usr/share/gstreamer-1.0/gdb"
 
+# The production-test and launcher resource trees intentionally expose many
+# of the same fonts under different paths. Preserve both interfaces while
+# storing each byte-identical file only once in the ext filesystem.
+for prod_resource in "${TARGET_DIR}/usr/local/share/ProdResources/"*; do
+	menu_resource="${TARGET_DIR}/usr/games/menu_resources/$(basename "${prod_resource}")"
+	if [ -f "${prod_resource}" ] && [ -f "${menu_resource}" ] && \
+		cmp -s "${prod_resource}" "${menu_resource}"; then
+		ln -f "${menu_resource}" "${prod_resource}"
+	fi
+done
+
 # libbz2 is required by runtime libraries, but its standalone compressor,
 # recovery tool, and shell wrappers are unused. BusyBox already provides the
 # two decompression applets needed by tar and interactive archive extraction.
