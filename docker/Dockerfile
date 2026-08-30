@@ -1,7 +1,9 @@
 FROM debian:buster-20200514-slim
 
 ARG FUNKEY_OS_REPOSITORY=https://github.com/Spaceghost/FunKey-OS.git
-ARG FUNKEY_OS_REF=docs/rg-nano-fork-identity
+ARG FUNKEY_OS_REF=master
+ARG ZIG_VERSION=0.16.0
+ARG ZIG_SHA256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
 
 LABEL \
 	maintainer="Michel Stempin <michel.stempin@funkey-project.com>" \
@@ -82,6 +84,11 @@ RUN \
 	sudo \
 	procps \
 	&& \
+	wget -q "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -O /tmp/zig.tar.xz && \
+	echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - && \
+	mkdir -p /opt/zig && \
+	tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig && \
+	rm -f /tmp/zig.tar.xz && \
 	apt-get -y autoremove && \
 	apt-get -y clean && \
 	rm -rf /var/lib/apt/lists/* && \
@@ -111,7 +118,8 @@ WORKDIR /home/funkey/FunKey-OS
 # Set environment
 ENV \
 	HOME=/home/funkey \
-	LC_ALL=en_US.UTF-8
+	LC_ALL=en_US.UTF-8 \
+	PATH=/opt/zig:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # VOLUME ["/home/funkey/.buildroot-ccache", \
 # 	"/home/funkey/FunKey-OS/buildroot", \
@@ -124,4 +132,4 @@ ENV \
 # 	"/home/funkey/FunKey-OS/FunKey/output/build", \
 # 	"/home/funkey/FunKey-OS/FunKey/output/target"]
 
-CMD ["/bin/sh", "-c", "exec make -j\"$(nproc)\" all -C /home/funkey/FunKey-OS"]
+CMD ["/bin/sh", "-c", "exec make -j\"$(nproc)\" zig-variants -C /home/funkey/FunKey-OS"]

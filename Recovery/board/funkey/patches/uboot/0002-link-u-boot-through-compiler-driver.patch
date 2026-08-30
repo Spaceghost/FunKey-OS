@@ -1,0 +1,30 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] build: link the final image through the compiler driver
+
+The old BFD linker crashes on relocations emitted by current Zig/LLVM. Keep
+Zig's LLD in charge by expressing the final raw-ld invocation as compiler
+driver linker options.
+
+---
+ Makefile | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 1728c8b..0876193 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1729,8 +1729,8 @@ endif
+ quiet_cmd_u-boot__ ?= LD      $@
+-      cmd_u-boot__ ?= $(LD) $(KBUILD_LDFLAGS) $(LDFLAGS_u-boot) -o $@ \
+-      -T u-boot.lds $(u-boot-init)                             \
+-      --start-group $(u-boot-main) --end-group                 \
+-      $(PLATFORM_LIBS) -Map u-boot.map;                        \
++      cmd_u-boot__ ?= $(CC) -nostdlib $(KBUILD_LDFLAGS) $(LDFLAGS_u-boot) \
++      -o $@ -Wl,-T -Wl,u-boot.lds $(u-boot-init)               \
++      -Wl,--start-group $(u-boot-main) -Wl,--end-group         \
++      $(PLATFORM_LIBS) -Wl,-Map,u-boot.map;                    \
+       $(if $(ARCH_POSTLINK), $(MAKE) -f $(ARCH_POSTLINK) $@, true)
+ 
+ quiet_cmd_smap = GEN     common/system_map.o
+-- 
+2.30.2

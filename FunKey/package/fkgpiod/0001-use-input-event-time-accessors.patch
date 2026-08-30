@@ -1,0 +1,27 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] use input_event timestamp accessors
+
+Modern Linux UAPI headers abstract the input_event timestamp fields for
+32-bit time64 ABIs.  Use those accessors; they also expand to the original
+timeval members with older headers.
+
+---
+ uinput.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/uinput.c b/uinput.c
+--- a/uinput.c
++++ b/uinput.c
+@@ -245,8 +245,8 @@ static int sendSync(void)
+   ie.type = EV_SYN;
+   ie.code = SYN_REPORT;
+   ie.value = 0;
+-  ie.time.tv_sec = 0;
+-  ie.time.tv_usec = 0;
++  ie.input_event_sec = 0;
++  ie.input_event_usec = 0;
+   if(write(uidev_fd, &ie, sizeof(struct input_event)) < 0)
+     die("error: sendSync - write");
+ 
+-- 
+2.30.2

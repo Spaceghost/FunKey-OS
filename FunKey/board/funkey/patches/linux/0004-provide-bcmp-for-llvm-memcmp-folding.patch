@@ -1,0 +1,24 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] lib: provide bcmp for LLVM memcmp folding
+
+LLVM can fold equality-only memcmp calls to bcmp even in this older
+freestanding kernel. Provide the equivalent internal implementation.
+
+---
+ lib/string.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/lib/string.c b/lib/string.c
+index 9db67de..c9d7506 100644
+--- a/lib/string.c
++++ b/lib/string.c
+@@ -1041,1 +1041,7 @@
+ #endif	/* CONFIG_STRING_SELFTEST */
++
++int bcmp(const void *left, const void *right, size_t len)
++{
++	return memcmp(left, right, len);
++}
++EXPORT_SYMBOL(bcmp);
+-- 
+2.30.2

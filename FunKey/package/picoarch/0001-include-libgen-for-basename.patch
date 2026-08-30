@@ -1,0 +1,22 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] include libgen for basename
+
+Do not rely on an implicit basename declaration; modern C compilers correctly
+reject treating its undeclared return value as a pointer.
+
+---
+ core.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/core.c b/core.c
+--- a/core.c
++++ b/core.c
+@@ -1,5 +1,6 @@
+ #include <dlfcn.h>
+ #include <dirent.h>
+ #include <errno.h>
++#include <libgen.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+-- 
+2.30.2

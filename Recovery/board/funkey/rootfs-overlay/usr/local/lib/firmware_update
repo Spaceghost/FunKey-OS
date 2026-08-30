@@ -21,8 +21,13 @@ find_firmware_update()
 # Validate the complete archive before allowing SWUpdate to stream anything to
 # the root partition. The normal install pass repeats these checks while it
 # writes, but discovering a damaged archive there would be too late.
+validate_firmware_update()
+{
+    swupdate -c -i "$1"
+}
+
 install_firmware_update()
 {
-    swupdate -c -i "$1" || return 1
+    validate_firmware_update "$1" || return 1
     swupdate -i "$1"
 }

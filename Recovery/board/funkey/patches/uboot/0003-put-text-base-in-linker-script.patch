@@ -1,0 +1,36 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] arm: put the configured text base in the linker script
+
+This avoids the legacy raw-ld -Ttext option when linking through Zig's
+compiler driver and LLD.
+
+---
+ Makefile                | 3 ++-
+ arch/arm/cpu/u-boot.lds | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 0876193..71f62a8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1725,5 +1725,6 @@ endif
+ quiet_cmd_u-boot__ ?= LD      $@
+-      cmd_u-boot__ ?= $(CC) -nostdlib $(KBUILD_LDFLAGS) $(LDFLAGS_u-boot) \
++      cmd_u-boot__ ?= $(CC) -nostdlib $(KBUILD_LDFLAGS) \
++      $(filter-out -Ttext $(CONFIG_SYS_TEXT_BASE),$(LDFLAGS_u-boot)) \
+       -o $@ -Wl,-T -Wl,u-boot.lds $(u-boot-init)               \
+       -Wl,--start-group $(u-boot-main) -Wl,--end-group         \
+       $(PLATFORM_LIBS) -Wl,-Map,u-boot.map;                    
+
+diff --git a/arch/arm/cpu/u-boot.lds b/arch/arm/cpu/u-boot.lds
+index 13c2557..b28ad1f 100644
+--- a/arch/arm/cpu/u-boot.lds
++++ b/arch/arm/cpu/u-boot.lds
+@@ -37,4 +37,4 @@ SECTIONS
+ #endif
+-	. = 0x00000000;
++	. = CONFIG_SYS_TEXT_BASE;
+ 
+ 	. = ALIGN(4);
+-- 
+2.30.2

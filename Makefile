@@ -27,6 +27,10 @@ FUNKEY_GIT_REV ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unkn
 FUNKEY_VERSION ?= 2.3.0-spaceghost.g$(FUNKEY_GIT_REV)
 export SOURCE_DATE_EPOCH E2FSPROGS_FAKE_TIME FUNKEY_VERSION
 
+ZIG_HOST_BIN := $(abspath FunKey/output/zig-host/bin)
+ZIG_HOST_CC := $(ZIG_HOST_BIN)/zig-host-cc
+ZIG_HOST_CXX := $(ZIG_HOST_BIN)/zig-host-c++
+
 # Strip quotes and then whitespaces
 qstrip = $(strip $(subst ",,$(1)))
 #"))
@@ -36,26 +40,64 @@ MESSAGE = echo "$(shell date +%Y-%m-%dT%H:%M:%S) $(TERM_BOLD)\#\#\# $(call qstri
 TERM_BOLD := $(shell tput smso 2>/dev/null)
 TERM_RESET := $(shell tput rmso 2>/dev/null)
 
-.PHONY: fun source image update checksums defconfig clean distclean print-version zig-cc zig-restore zig-all
+.PHONY: all firmware prepare-buildroot fun fun-recovery fun-funkey source image update checksums package-image package-update package-checksums package-inventory usb-variants defconfig clean distclean print-version zig-host zig-defconfig zig-cc zig-restore zig-all zig-variants
 
 .IGNORE: _Makefile_
 
-all: checksums
+all: zig-all
+	@:
+
+firmware: checksums package-inventory
 	@:
 
 checksums: image update
+	@$(MAKE) --no-print-directory package-checksums FUNKEY_VERSION='$(FUNKEY_VERSION)'
+
+package-checksums:
 	@$(call MESSAGE,"Creating artifact checksums")
 	@cd images && \
 	sha256sum \
 		FunKey-rootfs-$(FUNKEY_VERSION).fwu \
 		FunKey-sdcard-$(FUNKEY_VERSION).img \
+		FunKey-sdcard-$(FUNKEY_VERSION).img.xz \
 		> SHA256SUMS-$(FUNKEY_VERSION).txt.tmp && \
 	mv SHA256SUMS-$(FUNKEY_VERSION).txt.tmp SHA256SUMS-$(FUNKEY_VERSION).txt
+
+package-inventory: FunKey/output/.config Recovery/output/.config
+	@$(call MESSAGE,"Creating software package inventories")
+	@mkdir -p images
+	@$(BR) --no-print-directory BR2_EXTERNAL=../FunKey O=../FunKey/output show-info \
+		> images/packages-FunKey-$(FUNKEY_VERSION).json.raw
+	@sed -n '/^[[:space:]]*{/p' images/packages-FunKey-$(FUNKEY_VERSION).json.raw \
+		> images/packages-FunKey-$(FUNKEY_VERSION).json.tmp
+	@$(BR) --no-print-directory BR2_EXTERNAL=../Recovery O=../Recovery/output show-info \
+		> images/packages-Recovery-$(FUNKEY_VERSION).json.raw
+	@sed -n '/^[[:space:]]*{/p' images/packages-Recovery-$(FUNKEY_VERSION).json.raw \
+		> images/packages-Recovery-$(FUNKEY_VERSION).json.tmp
+	@rm -f images/packages-FunKey-$(FUNKEY_VERSION).json.raw \
+		images/packages-Recovery-$(FUNKEY_VERSION).json.raw
+	@mv images/packages-FunKey-$(FUNKEY_VERSION).json.tmp images/packages-FunKey-$(FUNKEY_VERSION).json
+	@mv images/packages-Recovery-$(FUNKEY_VERSION).json.tmp images/packages-Recovery-$(FUNKEY_VERSION).json
+	@./scripts/package-inventory-report \
+		images/packages-FunKey-$(FUNKEY_VERSION).json \
+		images/packages-FunKey-$(FUNKEY_VERSION).txt
+	@./scripts/package-inventory-report \
+		images/packages-Recovery-$(FUNKEY_VERSION).json \
+		images/packages-Recovery-$(FUNKEY_VERSION).txt
 
 print-version:
 	@printf '%s\n' '$(FUNKEY_VERSION)'
 
-zig-cc: FunKey/toolchain Recovery/toolchain
+zig-host:
+	@./scripts/install-zig-host-tools $(ZIG_HOST_BIN)
+
+zig-defconfig: zig-host
+	+@PATH="$(ZIG_HOST_BIN):$$PATH" HOSTCC="$(ZIG_HOST_CC)" HOSTCXX="$(ZIG_HOST_CXX)" \
+		$(MAKE) FunKey/funkey_defconfig Recovery/recovery_defconfig
+
+zig-cc: zig-host prepare-buildroot
+	+@PATH="$(ZIG_HOST_BIN):$$PATH" HOSTCC="$(ZIG_HOST_CC)" HOSTCXX="$(ZIG_HOST_CXX)" \
+		$(MAKE) FunKey/toolchain Recovery/toolchain
 	@./scripts/install-zig-cc FunKey/output
 	@./scripts/install-zig-cc Recovery/output
 
@@ -64,7 +106,14 @@ zig-restore:
 	@./scripts/install-zig-cc --restore Recovery/output
 
 zig-all: zig-cc
-	@$(MAKE) all
+	+@PATH="$(ZIG_HOST_BIN):$$PATH" HOSTCC="$(ZIG_HOST_CC)" HOSTCXX="$(ZIG_HOST_CXX)" \
+		$(MAKE) firmware
+
+zig-variants: zig-all
+	@./scripts/build-usb-network-variant '$(FUNKEY_VERSION)'
+
+usb-variants: checksums
+	@./scripts/build-usb-network-variant '$(FUNKEY_VERSION)'
 
 _Makefile_:
 	@:
@@ -80,10 +129,17 @@ buildroot/.git:
 	@git submodule init
 	@git submodule update
 
-fun: buildroot Recovery/output/.config FunKey/output/.config
+prepare-buildroot: buildroot/.git
+	@./scripts/prepare-buildroot
+
+fun: fun-recovery fun-funkey
 	@$(call MESSAGE,"Making fun")
+
+fun-recovery: prepare-buildroot Recovery/output/.config
 	@$(call MESSAGE,"Making fun in Recovery")
 	+@$(BRMAKE) BR2_EXTERNAL=../Recovery O=../Recovery/output
+
+fun-funkey: prepare-buildroot FunKey/output/.config
 	@$(call MESSAGE,"Making fun in FunKey")
 	+@$(BRMAKE) BR2_EXTERNAL=../FunKey O=../FunKey/output
 
@@ -130,6 +186,11 @@ source:
 	+@$(BR) BR2_EXTERNAL=../FunKey O=../FunKey/output source
 
 image: fun
+	@$(MAKE) --no-print-directory package-image FUNKEY_VERSION='$(FUNKEY_VERSION)'
+
+# Packaging-only entry points deliberately do not depend on `fun`. They are
+# used to derive profiles that only alter files inside completed rootfs images.
+package-image:
 	@$(call MESSAGE,"Creating disk image")
 	@rm -rf root-image tmp-image
 	@mkdir -p root-image tmp-image
@@ -137,6 +198,7 @@ image: fun
 		--rootpath root-image --tmppath tmp-image
 	@rm -rf root-image tmp-image
 	@mv images/sdcard.img images/FunKey-sdcard-$(FUNKEY_VERSION).img
+	@xz -T0 -6 -f -k images/FunKey-sdcard-$(FUNKEY_VERSION).img
 
 image-prod: fun
 	@$(call MESSAGE,"Creating disk image")
@@ -148,6 +210,9 @@ image-prod: fun
 	@mv images/sdcard-prod.img images/FunKey-sdcard-prod-$(FUNKEY_VERSION).img
 
 update: fun
+	@$(MAKE) --no-print-directory package-update FUNKEY_VERSION='$(FUNKEY_VERSION)'
+
+package-update:
 	@$(call MESSAGE,"Creating update file")
 	@rm -rf tmp-update
 	@mkdir -p tmp-update

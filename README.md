@@ -16,9 +16,9 @@ FunKey OS is based on Linux, and is built from scratch using the [buildroot](htt
 Technically, Funkey OS is a [buildroot (v2) based external tree](https://buildroot.org/downloads/manual/manual.html#outside-br-custom) for building the bootloader, the Linux kernel and user utilities, as well as the optimized retro-game launcher and console emulators.
 
 ## Build host requirements
-The resulting SD Card image is about 451 MiB and the compressed firmware update
-is about 127 MiB. Sources and intermediate build products are much larger; keep
-at least 20 GiB free for a complete build.
+The optimized raw SD Card image is 257 MiB; its distributable `.img.xz` and the
+compressed firmware update are each about 52 MiB. Sources and intermediate
+build products are much larger; keep at least 20 GiB free for a complete build.
 
 And even if the resulting FunKey OS boots in less than 5s, it still requires a considerable amount of time to compile: please account for 1 1/2 hour on a modern multi-core CPU with SSD drives and a decent Internet bandwidth.
 
@@ -47,8 +47,6 @@ While Buildroot itself will build most host packages it needs for the compilatio
  - cvs
  - expect
  - file
- - g++
- - gcc
  - git
  - gzip
  - liblscp-dev
@@ -76,11 +74,18 @@ While Buildroot itself will build most host packages it needs for the compilatio
  - wget
  - which
  - xxd
+ - Zig 0.16.0
 
 On Ubuntu/Debian Linux, this is achieved by running the following command:
 ```bash
-$ sudo apt install bash bc binutils build-essential bzip2 ca-certificates cmake cpio cvs expect file g++ gcc git gzip liblscp-dev libncurses5-dev locales make mercurial openssh-client patch perl procps python python-dev python3 python3-dev python3-distutils python3-setuptools rsync rsync sed subversion sudo tar unzip wget which xxd
+$ sudo apt install bash bc binutils build-essential bzip2 ca-certificates cmake cpio cvs expect file git gzip liblscp-dev libncurses5-dev locales make mercurial openssh-client patch perl procps python python-dev python3 python3-dev python3-distutils python3-setuptools rsync sed subversion sudo tar unzip wget which xxd
 ```
+
+Install Zig 0.16.0 from the official
+[download page](https://ziglang.org/download/). Buildroot may retain a GNU
+runtime/toolchain payload for target libraries and external assembly, but all C
+and C++ preprocessing, compilation, and compiler-driver links run through
+`zig cc`/`zig c++`; native GCC is not a compiler frontend in this build.
 
 ### How to get the sources
 When using either physical or virtual Linux machines, you must clone the FunKey OS repository from Github (here we place it into a `FunKey-OS` directory):
@@ -88,20 +93,18 @@ When using either physical or virtual Linux machines, you must clone the FunKey 
 ```bash
 $ git clone https://github.com/Spaceghost/FunKey-OS.git FunKey-OS
 $ cd FunKey-OS
-$ git switch docs/rg-nano-fork-identity
 ```
 
-`docs/rg-nano-fork-identity` contains the current software-validated
-development stack. Development and optimization work is published in named
-branches before it is integrated into `rg-nano-next`; physical RG Nano
-validation is still required before treating development artifacts as a
-release.
+Development and optimization work is published in named branches before it is
+integrated into the default branch. Physical RG Nano validation is still
+required before treating development artifacts as a stable release.
 
 ### Build the disk image & firmware update files
-Build the RG Nano SD image, update file, and checksums with:
+Build both USB profiles, their RG Nano SD images, firmware updates, checksums,
+and complete package inventories with Zig's C/C++ compiler frontends:
 
 ```bash
-$ make -j"$(nproc)" all
+$ make -j"$(nproc)" zig-variants
 ```
 Run `make sdk` separately only if you also need the cross-development SDK.
 This may take a while (~1h30), so consider getting yourself a cup, a glass or a bottle of your favorite beverage ;-)
@@ -109,10 +112,14 @@ This may take a while (~1h30), so consider getting yourself a cup, a glass or a 
 <ins>Note</ins>: you will need to have access to the network, since buildroot will download the package sources.
 
 ### Result of the build
-After building, you should obtain `FunKey-sdcard-<version>.img` and
-`FunKey-rootfs-<version>.fwu` in the `images` directory, together with a
-matching `SHA256SUMS-<version>.txt`. Run `make print-version` to show the
-version embedded in both artifacts. Verify copied or downloaded files with:
+After building, you should obtain composite and `-network-only` versions of
+`FunKey-sdcard-<version>.img`, its much smaller `.img.xz`, and
+`FunKey-rootfs-<version>.fwu` in the `images` directory, together with matching
+checksum manifests. The `packages-FunKey-*`
+and `packages-Recovery-*` files list all selected Buildroot packages as full
+JSON and as readable tab-separated name/version/license reports. Run
+`make print-version` to show the base version embedded in the artifacts.
+Verify copied or downloaded files with:
 
 ```bash
 $ version=$(make -s print-version)
@@ -201,3 +208,27 @@ It is possible to update an RG Nano over its USB-C data port:
 If more than one `FunKey-*.fwu` file is present, the RG Nano refuses to choose
 between them. Reconnect the shared drive and keep only the update you intend to
 install. Failed update files are preserved so they can be inspected or replaced.
+
+### Updating without USB mass storage
+
+The networking-only image preserves the same Recovery-based flashing path over
+USB RNDIS. With the RG Nano connected by a USB data cable, upload exactly one
+firmware archive using SFTP:
+
+```bash
+sftp root@192.168.137.2
+sftp> put images/FunKey-rootfs-<version>.fwu /mnt/FunKey-network-update.fwu
+sftp> quit
+```
+
+Then validate it and reboot into the automatic Recovery installer over SSH:
+
+```bash
+ssh root@192.168.137.2 funkey-flash /mnt/FunKey-network-update.fwu
+```
+
+No root password is required on the USB RNDIS connection. `funkey-flash`
+refuses files outside `/mnt`, ambiguous sets of update files, and archives that
+fail SWUpdate's complete preflight check. The running root filesystem is not
+flashed in place; the command marks Recovery as the next boot and Recovery
+performs the installation.

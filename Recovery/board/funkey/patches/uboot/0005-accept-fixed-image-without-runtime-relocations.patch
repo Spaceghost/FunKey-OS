@@ -1,0 +1,22 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] arm: accept fixed image without runtime relocations
+
+The fixed-address non-PIE image intentionally has no dynamic relocations.
+
+---
+ Makefile | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index d64130a..7869b2a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1960,4 +1960,5 @@ checkarmreloc: u-boot
+ 	@RELOC="`$(CROSS_COMPILE)readelf -r -W $< | cut -d ' ' -f 4 | \
+ 		grep R_A | sort -u`"; \
+-	if test "$$RELOC" != "R_ARM_RELATIVE" -a \
++	if test -n "$$RELOC" -a \
++		 "$$RELOC" != "R_ARM_RELATIVE" -a \
+ 		 "$$RELOC" != "R_AARCH64_RELATIVE"; then \
+-- 
+2.30.2

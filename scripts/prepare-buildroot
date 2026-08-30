@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+buildroot="$repo/buildroot"
+
+for patch in "$repo"/patches/buildroot/*.patch; do
+	if git -C "$buildroot" apply --check "$patch" 2>/dev/null; then
+		git -C "$buildroot" apply "$patch"
+	elif git -C "$buildroot" apply --reverse --check "$patch" 2>/dev/null; then
+		: # Already applied in this worktree.
+	else
+		echo "cannot apply Buildroot compatibility patch: $patch" >&2
+		exit 1
+	fi
+done

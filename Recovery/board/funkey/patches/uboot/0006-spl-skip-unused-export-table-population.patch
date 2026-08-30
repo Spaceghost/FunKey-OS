@@ -1,0 +1,26 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] spl: skip unused export-table population
+
+SPL has no standalone application jump table. Avoid expanding the full U-Boot
+export list there, where malloc is intentionally mapped to malloc_simple and
+would also rewrite the jump-table field name.
+
+---
+ common/exports.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/common/exports.c b/common/exports.c
+index e8bcae4..d4f4662 100644
+--- a/common/exports.c
++++ b/common/exports.c
+@@ -27,4 +27,8 @@ void jumptable_init(void)
+ {
+ 	gd->jt = malloc(sizeof(struct jt_funcs));
++#ifdef CONFIG_SPL_BUILD
++#undef EXPORT_FUNC
++#define EXPORT_FUNC(f, a, x, ...)
++#endif
+ #include <_exports.h>
+ }
+-- 
+2.30.2

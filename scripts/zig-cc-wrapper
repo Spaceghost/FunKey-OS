@@ -3,22 +3,62 @@ set -e
 
 host_bin=$(cd "$(dirname "$0")" && pwd)
 sysroot=$(cd "$host_bin/../arm-buildroot-linux-musleabihf/sysroot" && pwd)
-
-# GCC 10.2 produces a materially smaller BusyBox for this target. Keep that
-# package on the SDK compiler while using Zig for C elsewhere.
-case "$PWD/" in
-	*/busybox-*) exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "$@" ;;
+runtime_dirs=("$host_bin"/../opt/ext-toolchain/lib/gcc/*/*)
+if [[ ! -d ${runtime_dirs[0]} ]]; then
+	echo "zig-cc-wrapper: ARM runtime directory not found" >&2
+	exit 1
+fi
+runtime_dir=${runtime_dirs[0]}
+driver=cc
+case "$0" in
+	*++*) driver=c++ ;;
 esac
 
 if [[ $# -eq 1 && $1 == -v ]]; then
-	exec zig cc -target arm-linux-musleabihf -v
+	exec zig "$driver" -target arm-linux-musleabihf -v
 fi
+
+if [[ $# -eq 1 && $1 == --version ]]; then
+	zig "$driver" --version
+	printf '%s\n' 'zig target compiler wrapper (arm-linux-musleabihf)'
+	exit 0
+fi
+
+if [[ $# -eq 1 && $1 == -print-multi-os-directory ]]; then
+	printf '%s\n' '.'
+	exit 0
+fi
+
+# Meson 0.56 only recognizes legacy linker version banners. Its probe asks the
+# compiler driver to forward --version, so answer that probe without compiling.
+for arg in "$@"; do
+	if [[ $arg == -Wl,--version ]]; then
+		printf '%s\n' 'GNU ld (Zig ld compatibility) 2.35'
+		exit 0
+	fi
+done
 
 compile=false
 preprocess_only=false
+emit_assembly=false
+preprocess_output=false
+soft_float=false
+softfp=false
+uboot_link=false
 for arg in "$@"; do
 	case "$arg" in
 		-c|-S|-E|-M|-MM) compile=true ;;
+	esac
+	if [[ $arg == -S ]]; then
+		emit_assembly=true
+	fi
+	if [[ $arg == -E ]]; then
+		preprocess_output=true
+	fi
+	case "$arg" in
+		-msoft-float) soft_float=true ;;
+		-mfloat-abi=softfp) soft_float=true; softfp=true ;;
+		*u-boot.lds) soft_float=true; uboot_link=true ;;
 	esac
 	case "$arg" in
 		-E|-M|-MM) preprocess_only=true ;;
@@ -26,16 +66,19 @@ for arg in "$@"; do
 done
 
 args=()
-gcc_args=()
+dep_file=
+separate_deps=false
+if $emit_assembly || $preprocess_output; then
+	separate_deps=true
+fi
 use_sysroot_headers=true
-gcc_dependency_pass=false
-assembly_source=false
 c_source=false
-legacy_asm_generator=false
-soft_float_source=false
+assembly_source=false
 next_is_output=false
+output_file=
 for arg in "$@"; do
 	if $next_is_output; then
+		output_file=$arg
 		next_is_output=false
 		continue
 	fi
@@ -52,35 +95,76 @@ for arg in "$@"; do
 			if [[ -f $arg ]]; then
 				assembly_source=true
 			fi ;;
-		*/examples/standalone/stubs.c|examples/standalone/stubs.c)
-			# Old U-Boot injects its exported assembly stubs from an otherwise
-			# unused C function. Clang legitimately removes that function.
-			legacy_asm_generator=true ;;
 	esac
 done
 
+next_is_linker_value=false
 for arg in "$@"; do
+	if $next_is_linker_value; then
+		case "$arg" in
+			-Wl,*) args+=("$arg") ;;
+			*) args+=("-Wl,$arg") ;;
+		esac
+		next_is_linker_value=false
+		continue
+	fi
 	case "$arg" in
-		-Qunused-arguments|--target=*|--gcc-toolchain=*|--prefix=*|-mno-global-merge|-Wno-format-invalid-specifier|-Wno-gnu|-Wno-address-of-packed-member|-Wno-tautological-compare)
+		-Wp,-MD,*)
+			if $separate_deps; then
+				# Zig treats every dependency-generation spelling combined with -S
+				# as dependency-only. Generate the assembly and dependency file in
+				# two strict-Zig invocations below.
+				dep_file=${arg#-Wp,-MD,}
+			else
+				args+=("-MD" "-MF" "${arg#-Wp,-MD,}")
+			fi ;;
+		-L"$sysroot"/*)
+			args+=("-L${arg#-L"$sysroot"}") ;;
+		-Wl,--warn-common|-Wl,--verbose)
 			;;
-		-march=armv5t)
-			gcc_args+=("-march=armv7-a") ;;
-		*) gcc_args+=("$arg") ;;
-	esac
-
-	case "$arg" in
+		-Wl,--version-script=*)
+			args+=("-Wl,--undefined-version" "-Wl,--version-script" "-Wl,${arg#-Wl,--version-script=}") ;;
+		-Wl,--version-script)
+			args+=("-Wl,--undefined-version" "$arg") ;;
+		-Wl,-T|-Wl,-Ttext)
+			args+=("$arg")
+			next_is_linker_value=true ;;
+		--target=arm-linux|--gcc-toolchain=*|--prefix=*)
+			;;
+		--gc-sections|--no-dynamic-linker|-Bstatic)
+			args+=("-Wl,$arg") ;;
+		-Ttext)
+			args+=("-Wl,-Ttext")
+			next_is_linker_value=true ;;
+		-Wl,-Map,*)
+			;;
+		-Wl,-stats)
+			;;
+		-Wl,*,-stats,-lc)
+			args+=("${arg%,-stats,-lc}" "-lc") ;;
+		-Wl,*,-stats*)
+			args+=("${arg//,-stats/}") ;;
+		-lstdc++fs)
+			# libc++ provides filesystem in the main C++ runtime.
+			;;
+		-Wl,*.lds)
+			args+=("-Wl,-T" "-Wl,${arg#-Wl,}") ;;
+		*.lds)
+			if $compile; then
+				args+=("$arg")
+			else
+				args+=("-Wl,-T" "-Wl,$arg")
+			fi ;;
 		-std=c++*)
 			if ! $c_source; then
 				args+=("$arg")
 			fi ;;
-		-Wp,-MD,*)
-			gcc_dependency_pass=true ;;
+		-Os)
+			args+=("-Oz") ;;
 		-Qunused-arguments)
 			;;
-		-march=armv7-a+neon-vfpv4|-mcpu=cortex_a7|-mtune=cortex-a7|-mtune=generic-armv7-a|-mvectorize-with-neon-quad|-fstack-usage|-flto|-flto=*)
+		-mapcs|-mno-sched-prolog|-mno-thumb-interwork|-mno-single-pic-base|-march=armv5t|-march=armv7-a+neon-vfpv4|-mcpu=cortex_a7|-mtune=cortex-a7|-mtune=generic-armv7-a|-mvectorize-with-neon-quad|-mfpu=*|-mfloat-abi=*|-msoft-float|-fstack-usage|-flto|-flto=*)
 			;;
-		-msoft-float)
-			soft_float_source=true ;;
 		-nostdinc)
 			use_sysroot_headers=false
 			args+=("$arg") ;;
@@ -90,44 +174,96 @@ for arg in "$@"; do
 	esac
 done
 
-if ! $compile; then
-	exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "${gcc_args[@]}"
-fi
-
-if $assembly_source || $legacy_asm_generator || $soft_float_source; then
-	exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "${gcc_args[@]}"
-fi
-
-if $gcc_dependency_pass; then
-	(exec -a arm-linux-gcc "$host_bin/toolchain-wrapper" "${gcc_args[@]}")
-fi
-
 system_headers=()
 if $use_sysroot_headers; then
-	system_headers=(-I "$sysroot/usr/include")
+	# Keep the target C headers after Zig's libc++ wrapper headers so C++
+	# include_next resolves the underlying musl headers correctly.
+	system_headers=(-idirafter "$sysroot/usr/include")
 fi
 
+target=arm-linux-musleabihf
 cpu_args=(-mcpu=cortex_a7)
+float_args=(-mfpu=neon-vfpv4 -mfloat-abi=hard)
+if $soft_float; then
+	target=arm-linux-musleabi
+	float_args=(-mfloat-abi=soft)
+fi
+if $softfp; then
+	target=arm-linux-musleabihf
+	float_args=(-mfpu=neon -mfloat-abi=softfp)
+fi
 if $preprocess_only; then
 	cpu_args=()
 fi
 
-exec zig cc \
-	-target arm-linux-musleabihf \
+# A few retained ARM assembly sources use GNU as macro syntax unsupported by
+# LLVM's integrated assembler. Zig remains the compiler/preprocessor driver;
+# only the final assembly step is delegated to the target binutils assembler.
+if $assembly_source && $compile && ! $preprocess_only; then
+	export PATH="$host_bin/zig-target-tools:$PATH"
+	args+=("-fno-integrated-as")
+fi
+
+library_paths=()
+if ! $compile; then
+	# Zig resolves these absolute paths inside --sysroot.  Buildroot often
+	# relies on GCC's implicit target-library search or emits a staging path
+	# that Zig would otherwise prefix with the sysroot a second time.
+	library_paths=(
+		"--ld-path=$host_bin/arm-linux-ld"
+		"-B$runtime_dir"
+		"-L$runtime_dir"
+		-L/usr/lib
+		-L/lib
+	)
+fi
+
+command=(zig "$driver" \
+	-target "$target" \
 	--sysroot="$sysroot" \
 	"${cpu_args[@]}" \
-	-mfpu=neon-vfpv4 \
-	-mfloat-abi=hard \
-	-fno-sanitize=undefined \
+	"${float_args[@]}" \
+		-fno-sanitize=undefined \
+		-fno-builtin-bcmp \
 	-fno-unwind-tables \
 	-fno-asynchronous-unwind-tables \
+	-Qunused-arguments \
 	"${args[@]}" \
+	"${library_paths[@]}" \
 	"${system_headers[@]}" \
 	-Wno-error=date-time \
 	-Wno-error=c23-extensions \
+	-Wno-c++11-narrowing \
 	-Wno-error=implicit-function-declaration \
 	-Wno-error=incompatible-function-pointer-types \
 	-Wno-error=macro-redefined \
 	-Wno-error=parentheses \
+	-Wno-error=register \
 	-Wno-error=tautological-overlap-compare \
-	-Wno-error=zero-length-array
+	-Wno-error=zero-length-array)
+
+"${command[@]}"
+
+if $separate_deps && [[ -n $dep_file ]]; then
+	dep_command=()
+	skip_output=false
+	for arg in "${command[@]}"; do
+		if $skip_output; then
+			skip_output=false
+			continue
+		fi
+		case "$arg" in
+			-S|-E) ;;
+			-o) skip_output=true ;;
+			*) dep_command+=("$arg") ;;
+		esac
+	done
+	"${dep_command[@]}" -M > "$dep_file"
+fi
+
+# GCC creates an empty assembly output for a translation unit containing no
+# emitted code. Zig succeeds without creating the file. Old U-Boot uses such a
+# dependency-only translation unit and unconditionally reads the empty output.
+if $emit_assembly && [[ -n $output_file && ! -e $output_file ]]; then
+	: > "$output_file"
+fi

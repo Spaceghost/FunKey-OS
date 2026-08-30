@@ -1,0 +1,26 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] examples: keep standalone export stubs with Clang
+
+The function body emits globally visible assembly entry points. Clang can
+otherwise discard the function and its inline assembly because the function
+itself has no C callers. Mark it used so Zig's Clang frontend retains the
+export stubs without falling back to GCC.
+
+---
+ examples/standalone/stubs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/examples/standalone/stubs.c b/examples/standalone/stubs.c
+index 3e6f9af..fc15915 100644
+--- a/examples/standalone/stubs.c
++++ b/examples/standalone/stubs.c
+@@ -273,6 +273,6 @@ gd_t *global_data;
+ static
+ #endif /* GCC_VERSION */
+-void __attribute__((unused)) dummy(void)
++void __attribute__((used)) dummy(void)
+ {
+ #include <_exports.h>
+ }
+-- 
+2.30.2

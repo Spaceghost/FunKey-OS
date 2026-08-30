@@ -1,0 +1,3 @@
+# Force USB networking and omit the mass-storage function.
+USB_NETWORK=always
+USB_MASS_STORAGE=0

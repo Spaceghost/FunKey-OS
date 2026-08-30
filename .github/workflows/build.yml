@@ -14,7 +14,10 @@ jobs:
     runs-on: ubuntu-20.04
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - name: Install dependencies
       run: |
         sudo apt-get update
@@ -24,13 +27,15 @@ jobs:
         sudo rm -rf /var/lib/apt/lists/*
         sudo sed -i 's/# \(en_US.UTF-8\)/\1/' /etc/locale.gen
         sudo locale-gen --purge --lang en_US.UTF-8
-    - name: Build SDK
-      run: make sdk
-    - name: Build FunKey-OS
-      run: make
-    - uses: actions/upload-artifact@v2
+    - name: Build both FunKey-OS USB profiles with Zig
+      run: make -j"$(nproc)" zig-variants
+    - uses: actions/upload-artifact@v4
       with:
-        name: Upload artifacts
+        name: FunKey-OS firmware
         path: |
-          images/*
+          images/*.fwu
+          images/*.img.xz
+          images/SHA256SUMS-*.txt
+          images/packages-*.json
+          images/packages-*.txt
           br.log

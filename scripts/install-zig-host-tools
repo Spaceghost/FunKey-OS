@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+	echo "usage: $0 BIN_DIR" >&2
+	exit 2
+fi
+
+if ! command -v zig >/dev/null 2>&1; then
+	echo "zig is required in PATH" >&2
+	exit 1
+fi
+
+bin_dir=$1
+mkdir -p "$bin_dir"
+cp "$(dirname "$0")/zig-host-compiler" "$bin_dir/zig-host-cc"
+chmod +x "$bin_dir/zig-host-cc"
+ln -sfn zig-host-cc "$bin_dir/zig-host-c++"
+ln -sfn zig-host-cc "$bin_dir/cc"
+ln -sfn zig-host-cc "$bin_dir/gcc"
+ln -sfn zig-host-c++ "$bin_dir/c++"
+ln -sfn zig-host-c++ "$bin_dir/g++"

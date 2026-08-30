@@ -1,0 +1,21 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] staging: fbtft: do not return a value from void worker
+
+The deferred-I/O callback is void; its disabled path should simply return.
+
+---
+ drivers/staging/fbtft/fbtft-core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/staging/fbtft/fbtft-core.c b/drivers/staging/fbtft/fbtft-core.c
+--- a/drivers/staging/fbtft/fbtft-core.c
++++ b/drivers/staging/fbtft/fbtft-core.c
+@@ -869,5 +869,5 @@ static void fbtft_deferred_io(struct fb_info *info, struct list_head *pagelist)
+ 	/* This disables fbtft's defered io, useful in spi_async mode or
+ 	if any other driver handles screens updates instead of fbtft */
+ 	if (par->spi_async_mode)
+-		return VM_FAULT_LOCKED;
++		return;
+ 
+-- 
+2.30.2

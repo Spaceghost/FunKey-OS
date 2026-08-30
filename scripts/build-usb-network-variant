@@ -1,0 +1,54 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+base_version=${1:?usage: build-usb-network-variant VERSION}
+variant_version="${base_version}-network-only"
+profile="$repo/scripts/usb-gadget-network-only"
+
+declare -a images=(
+	"$repo/FunKey/output/images/rootfs.ext2"
+	"$repo/Recovery/output/images/rootfs.ext2"
+)
+backup_dir=$(mktemp -d "$repo/.usb-variant.XXXXXX")
+
+restore_images() {
+	local image
+	for image in "${images[@]}"; do
+		name=$(basename "$(dirname "$(dirname "$(dirname "$image")")")")
+		if [[ -e "$backup_dir/$name.rootfs.ext2" ]]; then
+			cp --reflink=auto --sparse=always \
+				"$backup_dir/$name.rootfs.ext2" "$image"
+		fi
+	done
+	rm -rf "$backup_dir"
+}
+trap restore_images EXIT
+
+for image in "${images[@]}"; do
+	name=$(basename "$(dirname "$(dirname "$(dirname "$image")")")")
+	cp --reflink=auto --sparse=always "$image" "$backup_dir/$name.rootfs.ext2"
+done
+
+# Both USB profiles share every compiled byte. Mutate a reflinked copy of each
+# completed ext4 filesystem instead of asking Buildroot to finalize twice.
+for image in "${images[@]}"; do
+	commands="$backup_dir/debugfs.commands"
+	{
+		printf '%s\n' 'cd /etc/default'
+		printf '%s\n' 'rm usb-gadget'
+		printf 'write %s %s\n' "$profile" 'usb-gadget'
+	} > "$commands"
+	debugfs -w -f "$commands" "$image" >/dev/null 2>&1
+	embedded=$(debugfs -R 'cat /etc/default/usb-gadget' "$image" 2>/dev/null)
+	grep -qx 'USB_NETWORK=always' <<<"$embedded"
+	grep -qx 'USB_MASS_STORAGE=0' <<<"$embedded"
+	fsck_status=0
+	e2fsck -pf "$image" >/dev/null || fsck_status=$?
+	if (( fsck_status > 1 )); then
+		exit "$fsck_status"
+	fi
+done
+
+make -C "$repo" -j1 package-image package-update package-checksums \
+	FUNKEY_VERSION="$variant_version"
