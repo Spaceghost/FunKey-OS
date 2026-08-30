@@ -47,8 +47,13 @@ do_postinst()
     # Copy OPKs
     cp -r ${root_mount}/usr/local/share/OPKs/* /mnt
 
-    # Copy freeware games and other necessary mnt files
-    unzip -q -n ${root_mount}/usr/local/share/freeware_games.zip -d /mnt/
+    # Custom firmware may inject the optional freeware pack. Public updates
+    # leave existing games alone instead of carrying an unchanged pack.
+    if [ -f ${root_mount}/usr/local/share/freeware_games.zip ]; then
+        unzip -q -n ${root_mount}/usr/local/share/freeware_games.zip -d /mnt/
+    fi
+
+    # Copy the files required by the launcher and emulators.
     unzip -q -n ${root_mount}/usr/local/share/funkey_files.zip -d /mnt/
 
     # Remove previous OPKs for default emulators
