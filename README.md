@@ -119,6 +119,10 @@ $ version=$(make -s print-version)
 $ cd images && sha256sum -c "SHA256SUMS-${version}.txt"
 ```
 
+The optional freeware collection is distributed independently so unchanged
+game data is not embedded in every OS image and update. See
+[`FREEWARE_GAMES.md`](FREEWARE_GAMES.md) for installation and version details.
+
 ## Build in a container
 
 ### Prerequisites
