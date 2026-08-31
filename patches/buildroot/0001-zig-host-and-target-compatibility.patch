@@ -38,23 +38,6 @@ index a69e4ad..b99bec4 100644
  #fbv doesn't support cross-compilation
  define FBV_CONFIGURE_CMDS
  	(cd $(FBV_DIR); rm -f config.cache; \
-diff --git a/package/lz4/lz4.mk b/package/lz4/lz4.mk
-index b0510d4..a3ca41c 100644
---- a/package/lz4/lz4.mk
-+++ b/package/lz4/lz4.mk
-@@ -23,8 +23,11 @@ LZ4_MAKE_OPTS += BUILD_STATIC=no
- endif
- 
- define HOST_LZ4_BUILD_CMDS
--	$(HOST_MAKE_ENV) $(HOST_CONFIGURE_OPTS) $(MAKE) -C $(@D) lib
-+	# Zig's multi-source shared-library link may reuse the first source's
-+	# conventional object name. Build the CLI before that link so its explicit
-+	# object list cannot observe a link-time intermediate.
- 	$(HOST_MAKE_ENV) $(HOST_CONFIGURE_OPTS) $(MAKE) -C $(@D) lz4
-+	$(HOST_MAKE_ENV) $(HOST_CONFIGURE_OPTS) $(MAKE) -C $(@D) lib
- endef
- 
- define HOST_LZ4_INSTALL_CMDS
 diff --git a/package/python/python.mk b/package/python/python.mk
 index 10718f4..9324592 100644
 --- a/package/python/python.mk

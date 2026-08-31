@@ -1,0 +1,25 @@
+diff --git a/package/lz4/0001-zig-compile-library-objects-separately.patch b/package/lz4/0001-zig-compile-library-objects-separately.patch
+new file mode 100644
+--- /dev/null
++++ b/package/lz4/0001-zig-compile-library-objects-separately.patch
+@@ -0,0 +1,20 @@
++Zig cc emits one combined object when several C sources are passed to a
++single compile-only invocation. LZ4 1.9.3 expects GCC's one-object-per-source
++behaviour, so its later CLI link sees the combined object alongside individual
++objects and fails with duplicate definitions.
++
++Build the static archive from an explicit object list. GNU make's ordinary
++one-source object rule then works with both GCC and Zig.
++
++diff --git a/lib/Makefile b/lib/Makefile
++--- a/lib/Makefile
+++++ b/lib/Makefile
++@@ -56,0 +57 @@ SRCFILES := $(sort $(wildcard *.c))
+++OBJFILES := $(SRCFILES:.c=.o)
++@@ -87 +88 @@ all32: all
++-liblz4.a: $(SRCFILES)
+++liblz4.a: $(OBJFILES)
++@@ -90,2 +91 @@ ifeq ($(BUILD_STATIC),yes)  # can be disabled on command line
++-	$(Q)$(CC) $(CPPFLAGS) $(CFLAGS) -c $^
++-	$(Q)$(AR) rcs $@ *.o
+++	$(Q)$(AR) rcs $@ $(OBJFILES)
