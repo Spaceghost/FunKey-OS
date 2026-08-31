@@ -4,7 +4,7 @@ on:
   push:
     branches: [ master ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, rg-nano-next ]
   workflow_dispatch:
     branches: [ master ]
 
