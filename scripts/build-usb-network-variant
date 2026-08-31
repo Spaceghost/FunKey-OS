@@ -5,6 +5,15 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 base_version=${1:?usage: build-usb-network-variant VERSION}
 variant_version="${base_version}-network-only"
 profile="$repo/scripts/usb-gadget-network-only"
+debugfs_bin=${DEBUGFS:-"$repo/FunKey/output/host/sbin/debugfs"}
+e2fsck_bin=${E2FSCK:-"$repo/FunKey/output/host/sbin/e2fsck"}
+
+for tool in "$debugfs_bin" "$e2fsck_bin"; do
+	if [[ ! -x "$tool" ]]; then
+		printf 'required host tool is missing or not executable: %s\n' "$tool" >&2
+		exit 127
+	fi
+done
 
 declare -a images=(
 	"$repo/FunKey/output/images/rootfs.ext2"
@@ -39,12 +48,12 @@ for image in "${images[@]}"; do
 		printf '%s\n' 'rm usb-gadget'
 		printf 'write %s %s\n' "$profile" 'usb-gadget'
 	} > "$commands"
-	debugfs -w -f "$commands" "$image" >/dev/null 2>&1
-	embedded=$(debugfs -R 'cat /etc/default/usb-gadget' "$image" 2>/dev/null)
+	"$debugfs_bin" -w -f "$commands" "$image" >/dev/null 2>&1
+	embedded=$("$debugfs_bin" -R 'cat /etc/default/usb-gadget' "$image" 2>/dev/null)
 	grep -qx 'USB_NETWORK=always' <<<"$embedded"
 	grep -qx 'USB_MASS_STORAGE=0' <<<"$embedded"
 	fsck_status=0
-	e2fsck -pf "$image" >/dev/null || fsck_status=$?
+	"$e2fsck_bin" -pf "$image" >/dev/null || fsck_status=$?
 	if (( fsck_status > 1 )); then
 		exit "$fsck_status"
 	fi
