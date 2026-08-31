@@ -9,6 +9,7 @@ LOCK_FILE=/var/lock/share.lock
 source /usr/local/lib/utils
 source /usr/local/lib/firmware_update
 source usb_gadget
+source /usr/local/lib/usb_network
 
 # The USB mass storage backing store file or partition
 BACKING_STORE_FILE=/sys/kernel/config/usb_gadget/FunKey/functions/mass_storage.mmcblk0p4/lun.0/file
@@ -141,21 +142,14 @@ is_share_started () {
 
 is_usb_data_connected () {
 
-    # Get USB state
-    local usb_present=$(cat /sys/class/power_supply/axp20x-usb/present)
-
-    # Get udc state
-    local udc_state=$(cat /sys/class/udc/musb-hdrc.1.auto/state)
-
-    if [ "x${udc_state}" = "xconfigured" -a "${usb_present}" -eq 1 ]; then
-
-	# Connected succesfully to a host
+    if usb_data_is_configured; then
+	# The gadget was enumerated by a data host, not merely powered.
 	echo "yes"
 	return 0
-    else
-	echo "no"
-	return 1
     fi
+
+    echo "no"
+    return 1
 }
 
 case "$1" in

@@ -1,0 +1,59 @@
+#!/bin/sh
+
+# Start after dhcpcd and Dropbear so the first pass can repair boot races.
+DAEMON=${USB_NETWORK_MONITOR_DAEMON:-/usr/local/sbin/usb_network_monitor}
+PIDFILE=${USB_NETWORK_MONITOR_PIDFILE:-/var/run/usb_network_monitor.pid}
+BUSYBOX=${USB_NETWORK_MONITOR_BUSYBOX:-/bin/busybox}
+
+monitor_is_running() {
+	monitor_pid=
+	[ -r "$PIDFILE" ] || return 1
+	IFS= read -r monitor_pid < "$PIDFILE" || return 1
+	case "$monitor_pid" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	kill -0 "$monitor_pid" 2>/dev/null
+}
+
+case "$1" in
+	start)
+		echo -n "Starting USB network monitor: "
+		if monitor_is_running; then
+			echo "OK"
+			exit 0
+		fi
+		rm -f "$PIDFILE"
+		start-stop-daemon -S -q -x "$BUSYBOX" -p "$PIDFILE" \
+			-m -b -o -- sh "$DAEMON"
+		monitor_status=$?
+		[ "$monitor_status" -eq 0 ] && echo "OK" || echo "ERROR"
+		exit "$monitor_status"
+		;;
+	stop)
+		echo -n "Stopping USB network monitor: "
+		monitor_status=0
+		if monitor_is_running; then
+			start-stop-daemon -K -q -x "$BUSYBOX" -p "$PIDFILE" -o || \
+				monitor_status=1
+			sleep 1
+			if kill -0 "$monitor_pid" 2>/dev/null; then
+				start-stop-daemon -K -q -s KILL -x "$BUSYBOX" \
+					-p "$PIDFILE" -o || monitor_status=1
+			fi
+		fi
+		rm -f "$PIDFILE"
+		"$DAEMON" --stop-services >/dev/null 2>&1 || monitor_status=1
+		[ "$monitor_status" -eq 0 ] && echo "OK" || echo "ERROR"
+		exit "$monitor_status"
+		;;
+	restart)
+		"$0" stop
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+
+exit 0
