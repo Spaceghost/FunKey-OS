@@ -159,8 +159,7 @@ init_usb_gadget() {
 	echo ${udc_driver} > ${GADGET}/UDC
 	sleep 5
 
-	# Start network services
-	systemctl start networking ntp dropbear > /dev/null 2>&1
+	# SysV init starts networking and Dropbear after S10share has created usb0.
 
 	# Unbind the device
 	echo > ${GADGET}/UDC
