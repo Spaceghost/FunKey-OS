@@ -58,7 +58,6 @@ package-checksums:
 	@cd images && \
 	sha256sum \
 		FunKey-rootfs-$(FUNKEY_VERSION).fwu \
-		FunKey-sdcard-$(FUNKEY_VERSION).img \
 		FunKey-sdcard-$(FUNKEY_VERSION).img.xz \
 		> SHA256SUMS-$(FUNKEY_VERSION).txt.tmp && \
 	mv SHA256SUMS-$(FUNKEY_VERSION).txt.tmp SHA256SUMS-$(FUNKEY_VERSION).txt
