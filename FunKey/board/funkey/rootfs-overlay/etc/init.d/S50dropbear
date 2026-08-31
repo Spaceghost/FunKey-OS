@@ -3,11 +3,13 @@
 # Starts dropbear sshd.
 #
 
+. /usr/local/lib/usb_network
+
 # Allow a few customizations from a config file
 test -r /etc/default/dropbear && . /etc/default/dropbear
 
 start() {
-	[ -e /sys/class/net/usb0 ] || return 0
+	usb_network_is_ready || return 0
 
 	DROPBEAR_ARGS="$DROPBEAR_ARGS -R"
 
@@ -31,14 +33,18 @@ start() {
 	printf "Starting dropbear sshd: "
 	umask 077
 
-	start-stop-daemon -S -q -p /var/run/dropbear.pid \
+	start-stop-daemon -S -q -o -p /var/run/dropbear.pid \
 		--exec /usr/sbin/dropbear -- $DROPBEAR_ARGS
-	[ $? = 0 ] && echo "OK" || echo "FAIL"
+	daemon_status=$?
+	[ "$daemon_status" -eq 0 ] && echo "OK" || echo "FAIL"
+	return "$daemon_status"
 }
 stop() {
 	printf "Stopping dropbear sshd: "
-	start-stop-daemon -K -q -p /var/run/dropbear.pid
-	[ $? = 0 ] && echo "OK" || echo "FAIL"
+	start-stop-daemon -K -q -o -p /var/run/dropbear.pid
+	daemon_status=$?
+	[ "$daemon_status" -eq 0 ] && echo "OK" || echo "FAIL"
+	return "$daemon_status"
 }
 restart() {
 	stop

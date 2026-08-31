@@ -1,0 +1,42 @@
+#!/bin/sh
+
+USB_NETWORK_SYSFS_ROOT=${USB_NETWORK_SYSFS_ROOT:-/sys}
+USB_NETWORK_GADGET_ROOT=${USB_NETWORK_GADGET_ROOT:-/sys/kernel/config/usb_gadget/FunKey}
+
+usb_network_is_enabled() {
+	[ -e "$USB_NETWORK_SYSFS_ROOT/class/net/usb0" ]
+}
+
+# A powered cable is not enough: the USB device controller reaches
+# "configured" only after a data host has enumerated the gadget.  This
+# controller leaves that state stale after disconnect, but resets its speed.
+usb_data_is_configured() {
+	local usb_speed usb_speed_path usb_state usb_state_path usb_udc
+
+	[ -r "$USB_NETWORK_GADGET_ROOT/UDC" ] || return 1
+	usb_udc=
+	IFS= read -r usb_udc < "$USB_NETWORK_GADGET_ROOT/UDC" || return 1
+	[ -n "$usb_udc" ] || return 1
+	usb_state_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/state"
+	[ -r "$usb_state_path" ] || return 1
+	usb_state=
+	IFS= read -r usb_state < "$usb_state_path" || return 1
+	[ "$usb_state" = configured ] || return 1
+
+	usb_speed_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/current_speed"
+	[ -r "$usb_speed_path" ] || return 1
+	usb_speed=
+	IFS= read -r usb_speed < "$usb_speed_path" || return 1
+	case "$usb_speed" in
+		low-speed|full-speed|high-speed|wireless|super-speed|super-speed-plus)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+usb_network_is_ready() {
+	usb_network_is_enabled && usb_data_is_configured
+}

@@ -78,9 +78,6 @@ init_adb() {
     # Mount the ADB function filesystem
     mount -t functionfs adb /dev/usb-ffs/adb
 
-    # Bring up the loopback network
-    ifup lo
-
     # Launch the ADB daemon
     adbd >/dev/null &
 
@@ -100,9 +97,6 @@ deinit_adb() {
 
     # Kill the ADB daemon
     killall adbd
-
-    # Bring down the local network
-    ifdown lo
 
     # Unmount the ADB function filesystem
     umount /dev/usb-ffs/adb
