@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+retrofe_patch="$repo/FunKey/board/funkey/patches/retrofe/0001-show-ssh-sftp-details-in-usb-menu.patch"
+gmenu2x_patch="$repo/FunKey/board/funkey/patches/gmenu2x/0001-show-ssh-sftp-details-in-usb-menu.patch"
+
+assert_line() {
+	grep -Fqx "$2" "$1"
+}
+
+assert_patch_contract() {
+	patch_file=$1
+
+	grep -Fq 'usb_network_enabled = access("/sys/class/net/usb0", F_OK) == 0;' "$patch_file"
+	grep -Fq '"SSH / SFTP",' "$patch_file"
+	grep -Fq '"root@192.168.137.2",' "$patch_file"
+	grep -Fq '"password: none"' "$patch_file"
+	grep -Fq 'usb_network_enabled && !menu_action && !menu_confirmation' "$patch_file"
+	grep -Fq 'menu_small_info_font' "$patch_file"
+	[ "$(grep -Fc 'SDL_FreeSurface(usb_text_surface);' "$patch_file")" -eq 1 ]
+	! grep -Fq '/mnt/usbnet' "$patch_file"
+}
+
+assert_patch_contract "$retrofe_patch"
+assert_patch_contract "$gmenu2x_patch"
+
+# GMenu2X used to follow a moving HEAD.  Keep it pinned to the source this
+# patch was reviewed and built against.
+assert_line "$repo/FunKey/package/gmenu2x/gmenu2x.mk" \
+	'GMENU2X_VERSION = 8dbc7bfc482262ec0d23c1abad6089aef4bcb6d0'
+
+# Prevent the on-device instructions from drifting away from the actual
+# network and authentication configuration.
+for rootfs in FunKey Recovery; do
+	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/dhcpcd.conf" \
+		'static ip_address=192.168.137.2/24'
+	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/default/dropbear" \
+		'DROPBEAR_ARGS="-B"'
+	assert_line "$repo/$rootfs/configs/$(printf '%s' "$rootfs" | tr '[:upper:]' '[:lower:]')_defconfig" \
+		'BR2_TARGET_GENERIC_ROOT_PASSWD=""'
+	assert_line "$repo/$rootfs/configs/$(printf '%s' "$rootfs" | tr '[:upper:]' '[:lower:]')_defconfig" \
+		'BR2_PACKAGE_DROPBEAR=y'
+	assert_line "$repo/$rootfs/configs/$(printf '%s' "$rootfs" | tr '[:upper:]' '[:lower:]')_defconfig" \
+		'BR2_PACKAGE_GESFTPSERVER=y'
+done
+
+for display_line in 'SSH / SFTP' 'root@192.168.137.2' 'password: none'; do
+	[ "${#display_line}" -le 24 ]
+done
+
+printf '%s\n' 'USB menu connection-info tests passed'
