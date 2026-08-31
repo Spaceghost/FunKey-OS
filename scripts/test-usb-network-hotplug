@@ -56,6 +56,15 @@ export USB_NETWORK_DHCPCD_PIDFILE USB_NETWORK_DROPBEAR_PIDFILE
 . "$USB_NETWORK_LIB"
 monitor="$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/usb_network_monitor"
 
+# dhcpcd 9.x uses a runtime directory; both the init script and monitor must
+# agree with its real master-process pidfile so disconnects actually stop it.
+for rootfs in FunKey Recovery; do
+	grep -qx 'PIDFILE=/var/run/dhcpcd/pid' \
+		"$repo/$rootfs/board/funkey/rootfs-overlay/etc/init.d/S41dhcpcd"
+	grep -qx 'USB_NETWORK_DHCPCD_PIDFILE=${USB_NETWORK_DHCPCD_PIDFILE:-/var/run/dhcpcd/pid}' \
+		"$repo/$rootfs/board/funkey/rootfs-overlay/usr/local/sbin/usb_network_monitor"
+done
+
 # VBUS is present, but a power-only connection never reaches "configured".
 usb_network_is_enabled
 ! usb_data_is_configured
