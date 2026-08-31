@@ -1,0 +1,125 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+test_dir=$(mktemp -d)
+
+cleanup() {
+	if [ -r "$test_dir/monitor.pid" ]; then
+		cleanup_pid=
+		IFS= read -r cleanup_pid < "$test_dir/monitor.pid" || true
+		case "$cleanup_pid" in
+			''|*[!0-9]*) ;;
+			*) kill "$cleanup_pid" 2>/dev/null || true ;;
+		esac
+	fi
+	rm -rf "$test_dir"
+}
+trap cleanup EXIT
+trap 'cleanup; trap - EXIT; exit 1' HUP INT TERM
+
+test_sysfs="$test_dir/sys"
+test_gadget="$test_dir/gadget"
+test_init="$test_dir/init.d"
+test_log="$test_dir/services.log"
+mkdir -p \
+	"$test_sysfs/class/net/usb0" \
+	"$test_sysfs/class/udc/controller" \
+	"$test_sysfs/class/power_supply/usb" \
+	"$test_gadget" \
+	"$test_init"
+printf '1\n' > "$test_sysfs/class/power_supply/usb/present"
+printf 'controller\n' > "$test_gadget/UDC"
+printf 'not attached\n' > "$test_sysfs/class/udc/controller/state"
+printf 'UNKNOWN\n' > "$test_sysfs/class/udc/controller/current_speed"
+
+for service in S41dhcpcd S42dropbear; do
+	{
+		printf '%s\n' '#!/bin/sh'
+		printf '%s\n' 'printf "%s %s\n" "$(basename "$0")" "$1" >> "$USB_NETWORK_TEST_LOG"'
+		printf '%s\n' '[ "${USB_NETWORK_TEST_FAIL:-}" != "$(basename "$0"):$1" ]'
+	} > "$test_init/$service"
+	chmod 0755 "$test_init/$service"
+done
+
+USB_NETWORK_LIB="$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network"
+USB_NETWORK_SYSFS_ROOT="$test_sysfs"
+USB_NETWORK_GADGET_ROOT="$test_gadget"
+USB_NETWORK_INIT_DIR="$test_init"
+USB_NETWORK_TEST_LOG="$test_log"
+USB_NETWORK_DHCPCD_PIDFILE="$test_dir/dhcpcd.pid"
+USB_NETWORK_DROPBEAR_PIDFILE="$test_dir/dropbear.pid"
+export USB_NETWORK_LIB USB_NETWORK_SYSFS_ROOT USB_NETWORK_GADGET_ROOT
+export USB_NETWORK_INIT_DIR USB_NETWORK_TEST_LOG
+export USB_NETWORK_DHCPCD_PIDFILE USB_NETWORK_DROPBEAR_PIDFILE
+
+. "$USB_NETWORK_LIB"
+monitor="$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/usb_network_monitor"
+
+# dhcpcd 9.x uses a runtime directory; both the init script and monitor must
+# agree with its real master-process pidfile so disconnects actually stop it.
+for rootfs in FunKey Recovery; do
+	grep -qx 'PIDFILE=/var/run/dhcpcd/pid' \
+		"$repo/$rootfs/board/funkey/rootfs-overlay/etc/init.d/S41dhcpcd"
+	grep -qx 'USB_NETWORK_DHCPCD_PIDFILE=${USB_NETWORK_DHCPCD_PIDFILE:-/var/run/dhcpcd/pid}' \
+		"$repo/$rootfs/board/funkey/rootfs-overlay/usr/local/sbin/usb_network_monitor"
+done
+
+# VBUS is present, but a power-only connection never reaches "configured".
+usb_network_is_enabled
+! usb_data_is_configured
+! usb_network_is_ready
+[ "$("$monitor" --once unknown)" = down ]
+[ "$(cat "$test_log")" = "$(printf '%s\n' 'S42dropbear stop' 'S41dhcpcd stop')" ]
+
+# A data host configures the gadget, starting address assignment before SSH.
+: > "$test_log"
+printf 'configured\n' > "$test_sysfs/class/udc/controller/state"
+printf 'high-speed\n' > "$test_sysfs/class/udc/controller/current_speed"
+usb_data_is_configured
+usb_network_is_ready
+USB_NETWORK_TEST_FAIL=S41dhcpcd:start
+export USB_NETWORK_TEST_FAIL
+[ "$("$monitor" --once down)" = down ]
+[ "$(cat "$test_log")" = 'S41dhcpcd start' ]
+unset USB_NETWORK_TEST_FAIL
+: > "$test_log"
+[ "$("$monitor" --once down)" = up ]
+[ "$(cat "$test_log")" = "$(printf '%s\n' \
+	'S41dhcpcd start' 'S42dropbear start')" ]
+
+# MUSB leaves the state stale at "configured" after disconnect, but resets
+# current_speed.  That must stop SSH first and then remove the USB address.
+: > "$test_log"
+printf 'UNKNOWN\n' > "$test_sysfs/class/udc/controller/current_speed"
+! usb_data_is_configured
+! usb_network_is_ready
+[ "$("$monitor" --once up)" = down ]
+[ "$(cat "$test_log")" = "$(printf '%s\n' 'S42dropbear stop' 'S41dhcpcd stop')" ]
+
+# The SysV wrapper refuses duplicate monitors and terminates the recorded PID.
+USB_NETWORK_MONITOR_DAEMON="$monitor"
+USB_NETWORK_MONITOR_PIDFILE="$test_dir/monitor.pid"
+USB_NETWORK_POLL_SECONDS=0.05
+export USB_NETWORK_MONITOR_DAEMON USB_NETWORK_MONITOR_PIDFILE
+export USB_NETWORK_POLL_SECONDS
+monitor_init="$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S43usb-network-monitor"
+"$monitor_init" start >/dev/null
+IFS= read -r first_monitor_pid < "$USB_NETWORK_MONITOR_PIDFILE"
+kill -0 "$first_monitor_pid"
+"$monitor_init" start >/dev/null
+IFS= read -r second_monitor_pid < "$USB_NETWORK_MONITOR_PIDFILE"
+[ "$first_monitor_pid" = "$second_monitor_pid" ]
+"$monitor_init" stop >/dev/null
+[ ! -e "$USB_NETWORK_MONITOR_PIDFILE" ]
+! kill -0 "$first_monitor_pid" 2>/dev/null
+
+# A configured mass-storage-only profile is data-connected but has no network.
+printf 'configured\n' > "$test_sysfs/class/udc/controller/state"
+printf 'full-speed\n' > "$test_sysfs/class/udc/controller/current_speed"
+rmdir "$test_sysfs/class/net/usb0"
+usb_data_is_configured
+! usb_network_is_enabled
+! usb_network_is_ready
+
+printf '%s\n' 'USB network hot-plug tests passed'
