@@ -5,9 +5,11 @@
 
 # Debian ifupdown needs the /run/network lock directory
 mkdir -p /run/network
-[ -f /mnt/usbnet ] || exit 0
+
 case "$1" in
   start)
+	# S10share creates usb0 only when this profile enables networking.
+	[ -e /sys/class/net/usb0 ] || exit 0
 	printf "Starting network: "
 	/sbin/ifup -a
 	[ $? = 0 ] && echo "OK" || echo "FAIL"
@@ -27,4 +29,3 @@ case "$1" in
 esac
 
 exit $?
-

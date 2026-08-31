@@ -3,11 +3,12 @@
 # Starts dropbear sshd.
 #
 
-#[ -f /mnt/usbnet ] || exit 0
 # Allow a few customizations from a config file
 test -r /etc/default/dropbear && . /etc/default/dropbear
 
 start() {
+	[ -e /sys/class/net/usb0 ] || return 0
+
 	DROPBEAR_ARGS="$DROPBEAR_ARGS -R"
 
 	# If /etc/dropbear is a symlink to /var/run/dropbear, and

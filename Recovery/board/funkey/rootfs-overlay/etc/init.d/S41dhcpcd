@@ -6,11 +6,11 @@
 DAEMON=/sbin/dhcpcd
 CONFIG=/etc/dhcpcd.conf
 PIDFILE=/var/run/dhcpcd.pid
-#[ -f /mnt/usbnet ] || exit 0
 [ -f $CONFIG ] || exit 0
 
 case "$1" in
   start)
+	[ -e /sys/class/net/usb0 ] || exit 0
 	echo -n "Starting dhcpcd: "
 	start-stop-daemon -S -x "$DAEMON" -p "$PIDFILE" -- -f "$CONFIG" > /dev/null 2>&1
 	if [ $? -eq 0 ]; then
