@@ -32,7 +32,7 @@ jobs:
             cvs expect file gawk git gzip liblscp-dev libncurses5-dev locales \
             mercurial openssh-client patch perl procps python3 python3-dev \
             python3-distutils python3-setuptools rsync subversion tar unzip \
-            wget which xxd xz-utils
+            wget xxd xz-utils
           ln -sfn /usr/bin/python3 /usr/local/bin/python
           locale-gen en_US.UTF-8
           rm -rf /var/lib/apt/lists/*
