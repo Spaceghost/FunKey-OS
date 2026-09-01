@@ -1,0 +1,102 @@
+name: FunKey USB hardware loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Build workflow run ID containing the FunKey-OS firmware artifact
+        required: true
+        type: string
+      log_prefix:
+        description: Safe filename prefix for hardware-loop logs
+        required: true
+        default: funkey-hil
+        type: string
+      device_host:
+        description: USB-debug device address
+        required: true
+        default: 192.168.137.2
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: funkey-usb-debug-hardware
+  cancel-in-progress: false
+
+jobs:
+  flash-inspect-boot:
+    runs-on: [self-hosted, linux, funkey-usb-debug]
+    timeout-minutes: 30
+    env:
+      FUNKEY_DEBUG_HOST: ${{ inputs.device_host }}
+      FUNKEY_DEBUG_TIMEOUT: 300
+      LOG_PREFIX: ${{ inputs.log_prefix }}
+      LOG_DIR: hardware-logs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate fixture inputs and host tools
+        shell: bash
+        run: |
+          [[ "$LOG_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            printf 'unsafe log prefix: %s\n' "$LOG_PREFIX" >&2
+            exit 2
+          }
+          command -v ssh
+          command -v sha256sum
+          mkdir -p "$LOG_DIR"
+
+      - name: Download firmware from the selected build
+        uses: actions/download-artifact@v4
+        with:
+          name: FunKey-OS firmware
+          path: downloaded-firmware
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Select and verify the USB-debug firmware
+        id: firmware
+        shell: bash
+        run: |
+          mapfile -t candidates < <(find downloaded-firmware -type f -name 'FunKey-*-usb-debug.fwu' -print)
+          if (( ${#candidates[@]} != 1 )); then
+            printf 'expected exactly one USB-debug FWU, found %d\n' "${#candidates[@]}" >&2
+            printf '%s\n' "${candidates[@]}" >&2
+            exit 1
+          fi
+          firmware=${candidates[0]}
+          checksum_file=$(find downloaded-firmware -type f -name 'SHA256SUMS-*-usb-debug.txt' -print -quit)
+          if [[ -n "$checksum_file" ]]; then
+            (
+              cd "$(dirname "$checksum_file")"
+              sha256sum -c "$(basename "$checksum_file")"
+            )
+          fi
+          printf 'firmware=%s\n' "$firmware" >> "$GITHUB_OUTPUT"
+
+      - name: Flash, inspect, boot, and collect both journals
+        shell: bash
+        run: |
+          ./scripts/funkey-usb-debug cycle \
+            "${{ steps.firmware.outputs.firmware }}" \
+            "$LOG_DIR/$LOG_PREFIX"
+
+      - name: Attempt a final live collection
+        if: always()
+        shell: bash
+        run: |
+          ./scripts/funkey-usb-debug logs \
+            "$LOG_DIR/$LOG_PREFIX-last-known.log" || true
+
+      - name: Upload hardware journals
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FunKey USB hardware logs
+          if-no-files-found: warn
+          path: hardware-logs/

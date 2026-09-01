@@ -1,4 +1,34 @@
 #!/bin/sh
-sfdisk -A /dev/mmcblk0 1 >/dev/null 2>&1
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+SFDISK_COMMAND=${SFDISK_COMMAND:-sfdisk}
+REBOOT_COMMAND=${REBOOT_COMMAND:-reboot}
+
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_run >/dev/null 2>&1 ||
+    usb_debug_run() { shift; "$@"; }
+command -v usb_debug_snapshot >/dev/null 2>&1 || usb_debug_snapshot() { :; }
+command -v usb_debug_set_update_state >/dev/null 2>&1 || usb_debug_set_update_state() { :; }
+command -v usb_debug_flush >/dev/null 2>&1 || usb_debug_flush() { :; }
+
+usb_debug_set_update_state selecting-recovery
+usb_debug_log boot-select "setting active partition=1"
+usb_debug_run boot-select "$SFDISK_COMMAND" -A /dev/mmcblk0 1
+boot_select_status=$?
+if [ "$boot_select_status" -ne 0 ]; then
+    usb_debug_set_update_state recovery-select-failed
+    usb_debug_log boot-select "failed active partition=1 status=$boot_select_status"
+    usb_debug_snapshot recovery-select-failed
+    echo "Cannot select recovery partition" >&2
+    exit "$boot_select_status"
+fi
+
+usb_debug_set_update_state booting-recovery
+usb_debug_snapshot before-recovery-reboot
+usb_debug_flush >/dev/null 2>&1 || :
+sync
 echo "Next boot will be in recovery mode"
-reboot
+exec "$REBOOT_COMMAND"

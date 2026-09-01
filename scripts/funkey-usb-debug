@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+FUNKEY_DEBUG_HOST=${FUNKEY_DEBUG_HOST:-192.168.137.2}
+FUNKEY_DEBUG_USER=${FUNKEY_DEBUG_USER:-root}
+FUNKEY_DEBUG_TIMEOUT=${FUNKEY_DEBUG_TIMEOUT:-240}
+FUNKEY_DEBUG_POLL_SECONDS=${FUNKEY_DEBUG_POLL_SECONDS:-2}
+FUNKEY_DEBUG_ALLOW_ANY_FIRMWARE=${FUNKEY_DEBUG_ALLOW_ANY_FIRMWARE:-0}
+FUNKEY_DEBUG_TARGET=${FUNKEY_DEBUG_USER}@${FUNKEY_DEBUG_HOST}
+
+SSH_OPTIONS=(
+    -o BatchMode=yes
+    -o ConnectTimeout=4
+    -o ConnectionAttempts=1
+    -o ServerAliveInterval=5
+    -o ServerAliveCountMax=2
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+)
+
+log() {
+    printf '[funkey-usb-debug] %s\n' "$*" >&2
+}
+
+ssh_device() {
+    ssh "${SSH_OPTIONS[@]}" "$FUNKEY_DEBUG_TARGET" "$@"
+}
+
+status_value() {
+    local key=$1 status=${2:-}
+    sed -n "s/^${key}=//p" <<<"$status" | head -n 1
+}
+
+device_status() {
+    ssh_device funkey-debug status
+}
+
+wait_for_mode() {
+    local expected=${1:-any}
+    local deadline=$(( $(date +%s) + FUNKEY_DEBUG_TIMEOUT ))
+    local next_notice=0 now status mode
+
+    while (( $(date +%s) < deadline )); do
+        if status=$(device_status 2>/dev/null); then
+            mode=$(status_value mode "$status")
+            if [[ "$expected" == any || "$mode" == "$expected" ]]; then
+                printf '%s\n' "$status"
+                return 0
+            fi
+        fi
+        now=$(date +%s)
+        if (( now >= next_notice )); then
+            log "waiting for ${expected} mode at ${FUNKEY_DEBUG_TARGET}"
+            next_notice=$((now + 10))
+        fi
+        sleep "$FUNKEY_DEBUG_POLL_SECONDS"
+    done
+
+    log "device did not reach ${expected} mode before the ${FUNKEY_DEBUG_TIMEOUT}s safety timeout"
+    return 1
+}
+
+wait_for_terminal_update_state() {
+    local deadline=$(( $(date +%s) + FUNKEY_DEBUG_TIMEOUT ))
+    local state next_notice=0 now
+
+    while (( $(date +%s) < deadline )); do
+        if state=$(ssh_device funkey-debug update-state 2>/dev/null); then
+            case "$state" in
+                held-after-flash|flash-failed|multiple-updates|no-update)
+                    printf '%s\n' "$state"
+                    return 0
+                    ;;
+            esac
+        fi
+        now=$(date +%s)
+        if (( now >= next_notice )); then
+            log "Recovery update state: ${state:-unreachable}"
+            next_notice=$((now + 10))
+        fi
+        sleep "$FUNKEY_DEBUG_POLL_SECONDS"
+    done
+
+    log "Recovery did not reach a terminal update state before the ${FUNKEY_DEBUG_TIMEOUT}s safety timeout"
+    return 1
+}
+
+validate_firmware_name() {
+    local firmware=$1 base
+    [[ -f "$firmware" ]] || {
+        log "firmware not found: $firmware"
+        return 2
+    }
+    base=$(basename "$firmware")
+    [[ "$base" == FunKey-*.fwu ]] || {
+        log "expected a FunKey-*.fwu artifact, got: $base"
+        return 2
+    }
+    [[ "$base" =~ ^[A-Za-z0-9._-]+$ ]] || {
+        log "firmware filename contains unsupported characters: $base"
+        return 2
+    }
+    if [[ "$FUNKEY_DEBUG_ALLOW_ANY_FIRMWARE" != 1 && "$base" != *-usb-debug.fwu ]]; then
+        log "refusing a non-debug firmware; set FUNKEY_DEBUG_ALLOW_ANY_FIRMWARE=1 to override"
+        return 2
+    fi
+}
+
+assert_no_remote_firmware() {
+    ssh_device '
+        set -- /mnt/FunKey-*.fwu
+        if [ "$#" -eq 1 ] && [ ! -e "$1" ]; then
+            exit 0
+        fi
+        echo "existing firmware archives:" >&2
+        ls -l /mnt/FunKey-*.fwu >&2
+        exit 17
+    '
+}
+
+upload_firmware() {
+    local firmware=$1 base remote local_size remote_size local_sha remote_sha status
+    validate_firmware_name "$firmware"
+    base=$(basename "$firmware")
+    remote=/mnt/$base
+
+    status=$(wait_for_mode normal)
+    [[ "$(status_value enabled "$status")" == yes ]] || {
+        log "the running firmware is not the usb-debug profile"
+        return 3
+    }
+    grep -q 'mount=local' <<<"$status" || {
+        log "/mnt is not local; stop/eject USB disk sharing before a network flash"
+        return 3
+    }
+
+    assert_no_remote_firmware
+    ssh_device funkey-debug hold >/dev/null
+
+    log "uploading $base over the USB-only SSH link"
+    ssh_device "umask 077; cat > '$remote.part' && { sync '$remote.part' 2>/dev/null || sync; } && mv '$remote.part' '$remote'" < "$firmware"
+
+    local_size=$(wc -c < "$firmware" | tr -d ' ')
+    remote_size=$(ssh_device "wc -c < '$remote'" | tr -d '[:space:]')
+    [[ "$local_size" == "$remote_size" ]] || {
+        log "size mismatch after upload: local=$local_size remote=$remote_size"
+        return 4
+    }
+
+    if command -v sha256sum >/dev/null 2>&1 &&
+       ssh_device 'command -v sha256sum >/dev/null 2>&1' >/dev/null 2>&1; then
+        local_sha=$(sha256sum "$firmware" | awk '{print $1}')
+        remote_sha=$(ssh_device "sha256sum '$remote'" | awk '{print $1}')
+        [[ "$local_sha" == "$remote_sha" ]] || {
+            log "SHA-256 mismatch after upload"
+            return 4
+        }
+        log "upload verified: sha256=$local_sha"
+    else
+        log "upload verified by byte count: $local_size bytes"
+    fi
+
+    printf '%s\n' "$remote"
+}
+
+collect_logs() {
+    local output=${1:-funkey-usb-debug-$(date -u +%Y%m%dT%H%M%SZ).log}
+    mkdir -p "$(dirname "$output")"
+    ssh_device funkey-debug collect host-collection >/dev/null
+    ssh_device funkey-debug dump > "$output"
+    log "saved $output"
+}
+
+collect_history() {
+    local output=${1:-funkey-usb-debug-history-$(date -u +%Y%m%dT%H%M%SZ).log}
+    mkdir -p "$(dirname "$output")"
+    ssh_device funkey-debug history > "$output"
+    log "saved $output"
+}
+
+request_reboot() {
+    local status
+    set +e
+    ssh_device funkey-debug "$@"
+    status=$?
+    set -e
+    # A clean reboot often closes Dropbear before SSH can report success.
+    if (( status != 0 && status != 255 )); then
+        return "$status"
+    fi
+}
+
+flash_firmware() {
+    local firmware=$1 prefix=${2:-funkey-usb-debug}
+    local remote terminal_state
+
+    remote=$(upload_firmware "$firmware")
+    log "validating the archive and rebooting into Recovery"
+    request_reboot flash "$remote"
+
+    wait_for_mode recovery >/dev/null
+    terminal_state=$(wait_for_terminal_update_state)
+    collect_logs "${prefix}-recovery.log"
+
+    if [[ "$terminal_state" != held-after-flash ]]; then
+        log "flash did not complete cleanly: $terminal_state"
+        ssh_device funkey-debug root-status > "${prefix}-root-status.txt" 2>&1 || true
+        return 5
+    fi
+
+    ssh_device funkey-debug root-status > "${prefix}-root-status.txt" 2>&1 || {
+        log "flashed rootfs inspection reported a problem; see ${prefix}-root-status.txt"
+        return 5
+    }
+    log "flash complete and held in Recovery; root report saved to ${prefix}-root-status.txt"
+}
+
+boot_normal() {
+    local prefix=${1:-funkey-usb-debug}
+    wait_for_mode recovery >/dev/null
+    log "releasing Recovery hold and booting the flashed rootfs"
+    request_reboot boot-normal
+
+    if ! wait_for_mode normal > "${prefix}-normal-status.txt"; then
+        log "normal userspace never returned over USB"
+        log "power on while holding Fn+Start, then run: $0 logs ${prefix}-manual-recovery.log"
+        return 6
+    fi
+    collect_logs "${prefix}-normal.log"
+    log "normal userspace returned; status saved to ${prefix}-normal-status.txt"
+}
+
+cycle_firmware() {
+    local firmware=$1 prefix=${2:-funkey-usb-debug}
+    flash_firmware "$firmware" "$prefix"
+    boot_normal "$prefix"
+}
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") COMMAND [ARGS]
+
+Commands:
+  status                         Show the live device state
+  wait [normal|recovery|any]     Wait for USB SSH and the requested mode
+  logs [OUTPUT.log]              Collect the current boot journal
+  history [OUTPUT.log]           Collect all persistent boot journals
+  hold                           Hold in Recovery after a successful flash
+  release                        Clear the Recovery hold
+  root-status [OUTPUT.txt]       Inspect the flashed rootfs from Recovery
+  reboot-recovery                Select Recovery and wait for it
+  flash FIRMWARE [PREFIX]        Upload, flash, inspect, and remain in Recovery
+  boot [PREFIX]                  Boot the held firmware and collect its journal
+  cycle FIRMWARE [PREFIX]        Flash, inspect, boot, and collect both journals
+
+Environment:
+  FUNKEY_DEBUG_HOST=192.168.137.2
+  FUNKEY_DEBUG_TIMEOUT=240
+  FUNKEY_DEBUG_ALLOW_ANY_FIRMWARE=0
+EOF
+}
+
+case "${1:-}" in
+    status)
+        device_status
+        ;;
+    wait)
+        wait_for_mode "${2:-any}"
+        ;;
+    logs)
+        collect_logs "${2:-}"
+        ;;
+    history)
+        collect_history "${2:-}"
+        ;;
+    hold)
+        ssh_device funkey-debug hold
+        ;;
+    release)
+        ssh_device funkey-debug release
+        ;;
+    root-status)
+        ssh_device funkey-debug root-status > "${2:-funkey-root-status.txt}"
+        ;;
+    reboot-recovery)
+        wait_for_mode normal >/dev/null
+        request_reboot boot-recovery
+        wait_for_mode recovery
+        ;;
+    flash)
+        [[ "$#" -ge 2 ]] || { usage >&2; exit 64; }
+        flash_firmware "$2" "${3:-funkey-usb-debug}"
+        ;;
+    boot)
+        boot_normal "${2:-funkey-usb-debug}"
+        ;;
+    cycle)
+        [[ "$#" -ge 2 ]] || { usage >&2; exit 64; }
+        cycle_firmware "$2" "${3:-funkey-usb-debug}"
+        ;;
+    help|-h|--help|'')
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 64
+        ;;
+esac

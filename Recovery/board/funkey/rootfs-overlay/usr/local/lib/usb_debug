@@ -1,0 +1,304 @@
+#!/bin/sh
+
+# Dormant in production images; enabled by the usb-debug profile.
+USB_DEBUG_CONFIG=${USB_DEBUG_CONFIG:-/etc/default/usb-gadget}
+if [ -r "$USB_DEBUG_CONFIG" ]; then
+    . "$USB_DEBUG_CONFIG"
+fi
+
+USB_DEBUG=${USB_DEBUG:-0}
+USB_DEBUG_HOLD_AFTER_FLASH=${USB_DEBUG_HOLD_AFTER_FLASH:-0}
+USB_DEBUG_ROOT=${USB_DEBUG_ROOT:-/mnt/FunKey/Debug}
+USB_DEBUG_MOUNT_POINT=${USB_DEBUG_MOUNT_POINT:-/mnt}
+USB_DEBUG_MOUNTS_FILE=${USB_DEBUG_MOUNTS_FILE:-/proc/mounts}
+USB_DEBUG_VOLATILE_LOG=${USB_DEBUG_VOLATILE_LOG:-/var/log/usb-debug.log}
+USB_DEBUG_SESSION_FILE=${USB_DEBUG_SESSION_FILE:-/var/run/usb-debug.session}
+USB_DEBUG_UPDATE_STATE_FILE=${USB_DEBUG_UPDATE_STATE_FILE:-/var/run/usb-debug.update-state}
+USB_DEBUG_HOLD_FILE=${USB_DEBUG_HOLD_FILE:-$USB_DEBUG_ROOT/hold-after-flash}
+USB_DEBUG_MODE_FILE=${USB_DEBUG_MODE_FILE:-/etc/sw-versions}
+USB_DEBUG_BOOT_ID_FILE=${USB_DEBUG_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}
+USB_DEBUG_LOG_TO_KMSG=${USB_DEBUG_LOG_TO_KMSG:-1}
+
+usb_debug_enabled()
+{
+    case "$USB_DEBUG" in
+        1|yes|true|on|always) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+usb_debug_mount_is_local()
+{
+    [ -r "$USB_DEBUG_MOUNTS_FILE" ] || return 1
+
+    while IFS=' ' read -r usb_debug_device usb_debug_mount usb_debug_rest; do
+        [ "$usb_debug_mount" = "$USB_DEBUG_MOUNT_POINT" ] && return 0
+    done < "$USB_DEBUG_MOUNTS_FILE"
+    return 1
+}
+
+usb_debug_mode()
+{
+    if [ -r "$USB_DEBUG_MODE_FILE" ]; then
+        usb_debug_mode_name=$(sed -n '1{s/[[:space:]].*$//;p;}' "$USB_DEBUG_MODE_FILE" 2>/dev/null)
+        case "$usb_debug_mode_name" in
+            Recovery*|recovery*) printf '%s\n' recovery ;;
+            *) printf '%s\n' normal ;;
+        esac
+    else
+        printf '%s\n' unknown
+    fi
+}
+
+usb_debug_session()
+{
+    if [ -s "$USB_DEBUG_SESSION_FILE" ]; then
+        cat "$USB_DEBUG_SESSION_FILE"
+        return 0
+    fi
+
+    usb_debug_session_id=
+    if [ -r "$USB_DEBUG_BOOT_ID_FILE" ]; then
+        IFS= read -r usb_debug_session_id < "$USB_DEBUG_BOOT_ID_FILE" || usb_debug_session_id=
+    fi
+    if [ -z "$usb_debug_session_id" ]; then
+        usb_debug_session_id="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || printf boot)-$$"
+    fi
+
+    mkdir -p "$(dirname "$USB_DEBUG_SESSION_FILE")" 2>/dev/null || :
+    printf '%s\n' "$usb_debug_session_id" > "$USB_DEBUG_SESSION_FILE"
+    printf '%s\n' "$usb_debug_session_id"
+}
+
+usb_debug_now()
+{
+    date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date
+}
+
+usb_debug_persistent_log_path()
+{
+    printf '%s/sessions/%s.log\n' "$USB_DEBUG_ROOT" "$(usb_debug_session)"
+}
+
+usb_debug_flush()
+{
+    usb_debug_enabled || return 0
+    usb_debug_mount_is_local || return 1
+    [ -r "$USB_DEBUG_VOLATILE_LOG" ] || return 0
+
+    usb_debug_session_id=$(usb_debug_session)
+    usb_debug_sessions_dir=$USB_DEBUG_ROOT/sessions
+    usb_debug_destination=$usb_debug_sessions_dir/$usb_debug_session_id.log
+    usb_debug_temporary=$usb_debug_sessions_dir/.$usb_debug_session_id.$$.log.tmp
+
+    mkdir -p "$usb_debug_sessions_dir" || return 1
+    cp "$USB_DEBUG_VOLATILE_LOG" "$usb_debug_temporary" || return 1
+    mv "$usb_debug_temporary" "$usb_debug_destination" || return 1
+
+    usb_debug_current_temporary=$USB_DEBUG_ROOT/.current-session.$$.tmp
+    printf '%s\n' "$usb_debug_session_id" > "$usb_debug_current_temporary" || return 1
+    mv "$usb_debug_current_temporary" "$USB_DEBUG_ROOT/current-session" || return 1
+    return 0
+}
+
+usb_debug_log()
+{
+    usb_debug_enabled || return 0
+
+    usb_debug_component=${1:-debug}
+    [ "$#" -gt 0 ] && shift
+    usb_debug_line="$(usb_debug_now) session=$(usb_debug_session) mode=$(usb_debug_mode) component=$usb_debug_component $*"
+
+    mkdir -p "$(dirname "$USB_DEBUG_VOLATILE_LOG")" 2>/dev/null || :
+    printf '%s\n' "$usb_debug_line" >> "$USB_DEBUG_VOLATILE_LOG"
+
+    if [ "$USB_DEBUG_LOG_TO_KMSG" = 1 ] && [ -w /dev/kmsg ]; then
+        printf '%s\n' "usb-debug: $usb_debug_line" > /dev/kmsg 2>/dev/null || :
+    fi
+
+    usb_debug_flush >/dev/null 2>&1 || :
+}
+
+usb_debug_run()
+{
+    usb_debug_component=${1:-command}
+    [ "$#" -gt 0 ] && shift
+
+    if ! usb_debug_enabled; then
+        "$@"
+        return $?
+    fi
+
+    mkdir -p "$(dirname "$USB_DEBUG_VOLATILE_LOG")" 2>/dev/null || :
+    usb_debug_log "$usb_debug_component" "begin command=$*"
+
+    usb_debug_fifo=${USB_DEBUG_FIFO_PREFIX:-/tmp/usb-debug-run}.$$
+    rm -f "$usb_debug_fifo"
+
+    if mkfifo "$usb_debug_fifo" 2>/dev/null; then
+        tee -a "$USB_DEBUG_VOLATILE_LOG" < "$usb_debug_fifo" &
+        usb_debug_tee_pid=$!
+        "$@" > "$usb_debug_fifo" 2>&1
+        usb_debug_status=$?
+        wait "$usb_debug_tee_pid" 2>/dev/null || :
+        rm -f "$usb_debug_fifo"
+    else
+        usb_debug_capture=${USB_DEBUG_CAPTURE_PREFIX:-/tmp/usb-debug-run}.$$.log
+        rm -f "$usb_debug_capture"
+        "$@" > "$usb_debug_capture" 2>&1
+        usb_debug_status=$?
+        cat "$usb_debug_capture" | tee -a "$USB_DEBUG_VOLATILE_LOG"
+        rm -f "$usb_debug_capture"
+    fi
+
+    usb_debug_log "$usb_debug_component" "end status=$usb_debug_status command=$*"
+    return "$usb_debug_status"
+}
+
+usb_debug_update_state()
+{
+    if [ -r "$USB_DEBUG_UPDATE_STATE_FILE" ]; then
+        cat "$USB_DEBUG_UPDATE_STATE_FILE"
+        return 0
+    fi
+    if usb_debug_mount_is_local && [ -r "$USB_DEBUG_ROOT/update-state" ]; then
+        cat "$USB_DEBUG_ROOT/update-state"
+        return 0
+    fi
+    printf '%s\n' unknown
+}
+
+usb_debug_set_update_state()
+{
+    usb_debug_enabled || return 0
+    usb_debug_state=${1:-unknown}
+    mkdir -p "$(dirname "$USB_DEBUG_UPDATE_STATE_FILE")" 2>/dev/null || :
+    printf '%s\n' "$usb_debug_state" > "$USB_DEBUG_UPDATE_STATE_FILE"
+
+    if usb_debug_mount_is_local; then
+        mkdir -p "$USB_DEBUG_ROOT" 2>/dev/null || :
+        printf '%s\n' "$usb_debug_state" > "$USB_DEBUG_ROOT/.update-state.tmp" &&
+            mv "$USB_DEBUG_ROOT/.update-state.tmp" "$USB_DEBUG_ROOT/update-state"
+    fi
+    usb_debug_log update-state "state=$usb_debug_state"
+}
+
+usb_debug_should_hold_after_flash()
+{
+    usb_debug_enabled || return 1
+    case "$USB_DEBUG_HOLD_AFTER_FLASH" in
+        1|yes|true|on|always) return 0 ;;
+    esac
+    [ -e "$USB_DEBUG_HOLD_FILE" ]
+}
+
+usb_debug_snapshot()
+{
+    usb_debug_enabled || return 0
+    usb_debug_label=${1:-manual}
+    mkdir -p "$(dirname "$USB_DEBUG_VOLATILE_LOG")" 2>/dev/null || :
+
+    usb_debug_log snapshot "begin label=$usb_debug_label"
+    {
+        printf '\n===== usb-debug snapshot: %s (%s) =====\n' "$usb_debug_label" "$(usb_debug_now)"
+        printf '%s\n' '-- profile --'
+        if [ -r "$USB_DEBUG_CONFIG" ]; then
+            cat "$USB_DEBUG_CONFIG"
+        else
+            printf 'missing: %s\n' "$USB_DEBUG_CONFIG"
+        fi
+        printf 'mode=%s\n' "$(usb_debug_mode)"
+        printf 'session=%s\n' "$(usb_debug_session)"
+        printf 'update_state=%s\n' "$(usb_debug_update_state)"
+
+        printf '%s\n' '-- versions --'
+        [ -r "$USB_DEBUG_MODE_FILE" ] && cat "$USB_DEBUG_MODE_FILE"
+        command -v uname >/dev/null 2>&1 && uname -a
+        [ -r /proc/cmdline ] && cat /proc/cmdline
+        [ -r /proc/uptime ] && cat /proc/uptime
+
+        printf '%s\n' '-- block devices and partitions --'
+        [ -r /proc/partitions ] && cat /proc/partitions
+        if command -v sfdisk >/dev/null 2>&1; then
+            sfdisk -d /dev/mmcblk0 2>&1 || :
+        fi
+
+        printf '%s\n' '-- mounts --'
+        [ -r "$USB_DEBUG_MOUNTS_FILE" ] && cat "$USB_DEBUG_MOUNTS_FILE"
+        command -v df >/dev/null 2>&1 && df -h 2>&1 || :
+
+        printf '%s\n' '-- usb gadget --'
+        usb_debug_gadget=/sys/kernel/config/usb_gadget/FunKey
+        for usb_debug_file in \
+            "$usb_debug_gadget/UDC" \
+            "$usb_debug_gadget/idVendor" \
+            "$usb_debug_gadget/idProduct" \
+            "$usb_debug_gadget/configs/FunKey.1/strings/0x409/configuration" \
+            "$usb_debug_gadget/functions/mass_storage.mmcblk0p4/lun.0/file"
+        do
+            if [ -r "$usb_debug_file" ]; then
+                printf '%s=' "$usb_debug_file"
+                cat "$usb_debug_file"
+            fi
+        done
+        for usb_debug_udc in /sys/class/udc/*; do
+            [ -e "$usb_debug_udc" ] || continue
+            printf 'udc=%s\n' "$(basename "$usb_debug_udc")"
+            for usb_debug_attr in state current_speed maximum_speed; do
+                if [ -r "$usb_debug_udc/$usb_debug_attr" ]; then
+                    printf '%s=' "$usb_debug_attr"
+                    cat "$usb_debug_udc/$usb_debug_attr"
+                fi
+            done
+        done
+
+        printf '%s\n' '-- network --'
+        if [ -r /sys/class/net/usb0/operstate ]; then
+            printf 'usb0_operstate='
+            cat /sys/class/net/usb0/operstate
+        else
+            printf '%s\n' 'usb0=absent'
+        fi
+        command -v ip >/dev/null 2>&1 && ip address show 2>&1 || :
+        command -v ip >/dev/null 2>&1 && ip route show 2>&1 || :
+        command -v ifconfig >/dev/null 2>&1 && ifconfig -a 2>&1 || :
+        command -v route >/dev/null 2>&1 && route -n 2>&1 || :
+        [ -r /etc/resolv.conf ] && cat /etc/resolv.conf
+
+        printf '%s\n' '-- service pids --'
+        for usb_debug_pidfile in \
+            /var/run/dhcpcd/pid \
+            /var/run/dropbear.pid \
+            /var/run/usb_network_monitor.pid \
+            /var/run/usb_debug_monitor.pid
+        do
+            if [ -r "$usb_debug_pidfile" ]; then
+                printf '%s=' "$usb_debug_pidfile"
+                cat "$usb_debug_pidfile"
+            else
+                printf '%s=missing\n' "$usb_debug_pidfile"
+            fi
+        done
+        command -v ps >/dev/null 2>&1 && ps w 2>&1 || :
+
+        printf '%s\n' '-- firmware archives --'
+        usb_debug_found_update=0
+        for usb_debug_update in "$USB_DEBUG_MOUNT_POINT"/FunKey-*.fwu; do
+            [ -e "$usb_debug_update" ] || continue
+            usb_debug_found_update=1
+            ls -l "$usb_debug_update"
+        done
+        [ "$usb_debug_found_update" -eq 1 ] || printf '%s\n' none
+
+        printf '%s\n' '-- kernel tail --'
+        command -v dmesg >/dev/null 2>&1 && dmesg 2>&1 | tail -n 250 || :
+
+        printf '%s\n' '-- syslog tail --'
+        command -v logread >/dev/null 2>&1 && logread 2>&1 | tail -n 250 || :
+
+        printf '===== end usb-debug snapshot: %s =====\n\n' "$usb_debug_label"
+    } >> "$USB_DEBUG_VOLATILE_LOG" 2>&1
+
+    usb_debug_log snapshot "end label=$usb_debug_label"
+    usb_debug_flush >/dev/null 2>&1 || :
+}

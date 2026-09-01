@@ -1,0 +1,101 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+base_version=${1:?usage: build-usb-variant VERSION VARIANT PROFILE}
+variant=${2:?usage: build-usb-variant VERSION VARIANT PROFILE}
+profile_argument=${3:?usage: build-usb-variant VERSION VARIANT PROFILE}
+
+case "$variant" in
+    ''|*[!A-Za-z0-9._-]*)
+        printf 'invalid USB variant name: %s\n' "$variant" >&2
+        exit 2
+        ;;
+esac
+
+case "$profile_argument" in
+    /*) profile=$profile_argument ;;
+    *) profile=$repo/$profile_argument ;;
+esac
+
+if [[ ! -r "$profile" ]]; then
+    printf 'USB profile is missing or unreadable: %s\n' "$profile" >&2
+    exit 2
+fi
+
+variant_version="${base_version}-${variant}"
+debugfs_bin=${DEBUGFS:-"$repo/FunKey/output/host/sbin/debugfs"}
+e2fsck_bin=${E2FSCK:-"$repo/FunKey/output/host/sbin/e2fsck"}
+filesystem_time=${SOURCE_DATE_EPOCH:-$(git -C "$repo" log -1 --format=%ct)}
+
+if [[ ! "$filesystem_time" =~ ^[0-9]+$ ]]; then
+    printf 'invalid filesystem timestamp: %s\n' "$filesystem_time" >&2
+    exit 2
+fi
+
+for tool in "$debugfs_bin" "$e2fsck_bin"; do
+    if [[ ! -x "$tool" ]]; then
+        printf 'required host tool is missing or not executable: %s\n' "$tool" >&2
+        exit 127
+    fi
+done
+
+declare -a images=(
+    "$repo/FunKey/output/images/rootfs.ext2"
+    "$repo/Recovery/output/images/rootfs.ext2"
+)
+backup_dir=$(mktemp -d "$repo/.usb-variant.XXXXXX")
+
+restore_images() {
+    local image name
+    for image in "${images[@]}"; do
+        name=$(basename "$(dirname "$(dirname "$(dirname "$image")")")")
+        if [[ -e "$backup_dir/$name.rootfs.ext2" ]]; then
+            cp --reflink=auto --sparse=always \
+                "$backup_dir/$name.rootfs.ext2" "$image"
+        fi
+    done
+    rm -rf "$backup_dir"
+}
+trap restore_images EXIT
+
+for image in "${images[@]}"; do
+    name=$(basename "$(dirname "$(dirname "$(dirname "$image")")")")
+    if [[ ! -f "$image" ]]; then
+        printf 'completed rootfs image is missing: %s\n' "$image" >&2
+        exit 2
+    fi
+    cp --reflink=auto --sparse=always "$image" "$backup_dir/$name.rootfs.ext2"
+done
+
+# USB variants share every compiled byte. Mutate a copy of each completed
+# filesystem, package it, and restore the exact base image on exit.
+for image in "${images[@]}"; do
+    commands="$backup_dir/debugfs.commands"
+    {
+        printf '%s\n' 'cd /etc/default'
+        printf '%s\n' 'rm usb-gadget'
+        printf 'write %s %s\n' "$profile" 'usb-gadget'
+    } > "$commands"
+
+    E2FSPROGS_FAKE_TIME="$filesystem_time" \
+        "$debugfs_bin" -w -f "$commands" "$image" >/dev/null 2>&1
+
+    embedded=$("$debugfs_bin" -R 'cat /etc/default/usb-gadget' "$image" 2>/dev/null)
+    expected=$(cat "$profile")
+    if [[ "$embedded" != "$expected" ]]; then
+        printf 'embedded USB profile does not match %s in %s\n' "$profile" "$image" >&2
+        diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$embedded") >&2 || true
+        exit 1
+    fi
+
+    fsck_status=0
+    E2FSPROGS_FAKE_TIME="$filesystem_time" E2FSCK_TIME="$filesystem_time" \
+        "$e2fsck_bin" -pf "$image" >/dev/null || fsck_status=$?
+    if (( fsck_status > 1 )); then
+        exit "$fsck_status"
+    fi
+done
+
+make -C "$repo" -j1 package-image package-update package-checksums \
+    FUNKEY_VERSION="$variant_version"

@@ -1,20 +1,37 @@
 #!/bin/sh
 
-# Define log functions if they do not exist yet
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+
+utils_debug_log()
+{
+    if command -v usb_debug_log >/dev/null 2>&1; then
+        usb_debug_log "${SELF:-$(basename "$0")}" "$@"
+    fi
+}
+
+# Define log functions if they do not exist yet.
 type -t info >/dev/null 2>&1
 if [ $? -ne 0 ]; then
-    info () {
-	echo "$SELF:" "$@" | tee /dev/kmsg
+    info()
+    {
+        printf '%s: %s\n' "${SELF:-$(basename "$0")}" "$*" | tee /dev/kmsg
+        utils_debug_log "level=info message=$*"
     }
 
-    warn () {
-    	 echo "$SELF:" "$@" >&2 | tee /dev/kmsg
+    warn()
+    {
+        printf '%s: %s\n' "${SELF:-$(basename "$0")}" "$*" | tee /dev/kmsg >&2
+        utils_debug_log "level=warning message=$*"
     }
 
-    die () {
-    	local return_code=$1
-	shift
-	warn "$@"
-	exit $return_code
+    die()
+    {
+        local return_code=$1
+        shift
+        warn "$@"
+        exit "$return_code"
     }
 fi
