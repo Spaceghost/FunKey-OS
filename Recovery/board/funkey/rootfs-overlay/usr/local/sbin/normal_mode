@@ -1,4 +1,34 @@
 #!/bin/sh
-sfdisk -A /dev/mmcblk0 2 >/dev/null 2>&1
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+SFDISK_COMMAND=${SFDISK_COMMAND:-sfdisk}
+REBOOT_COMMAND=${REBOOT_COMMAND:-reboot}
+
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_run >/dev/null 2>&1 ||
+    usb_debug_run() { shift; "$@"; }
+command -v usb_debug_snapshot >/dev/null 2>&1 || usb_debug_snapshot() { :; }
+command -v usb_debug_set_update_state >/dev/null 2>&1 || usb_debug_set_update_state() { :; }
+command -v usb_debug_flush >/dev/null 2>&1 || usb_debug_flush() { :; }
+
+usb_debug_set_update_state selecting-normal
+usb_debug_log boot-select "setting active partition=2"
+usb_debug_run boot-select "$SFDISK_COMMAND" -A /dev/mmcblk0 2
+boot_select_status=$?
+if [ "$boot_select_status" -ne 0 ]; then
+    usb_debug_set_update_state normal-select-failed
+    usb_debug_log boot-select "failed active partition=2 status=$boot_select_status"
+    usb_debug_snapshot normal-select-failed
+    echo "Cannot select normal partition" >&2
+    exit "$boot_select_status"
+fi
+
+usb_debug_set_update_state booting-normal
+usb_debug_snapshot before-normal-reboot
+usb_debug_flush >/dev/null 2>&1 || :
+sync
 echo "Next boot will be in normal mode"
-reboot
+exec "$REBOOT_COMMAND"

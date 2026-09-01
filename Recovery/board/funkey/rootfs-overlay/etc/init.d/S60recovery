@@ -1,44 +1,100 @@
 #!/bin/sh
 
-THIS=$(basename $0)
+SELF=$(basename "$0")
 
-source /usr/local/lib/utils
-source /usr/local/lib/firmware_update
+. /usr/local/lib/utils
+. /usr/local/lib/firmware_update
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_snapshot >/dev/null 2>&1 || usb_debug_snapshot() { :; }
+command -v usb_debug_set_update_state >/dev/null 2>&1 || usb_debug_set_update_state() { :; }
+command -v usb_debug_should_hold_after_flash >/dev/null 2>&1 ||
+    usb_debug_should_hold_after_flash() { return 1; }
+
+recovery_menu()
+{
+    menu &
+}
 
 case "$1" in
     start)
-	keys=$(devmem 0x01c20500 16)
-	if [ "${keys}" != "0xF83F" ]; then
+        usb_debug_set_update_state recovery-start
+        usb_debug_log recovery "startup"
+        usb_debug_snapshot recovery-start
 
-	    # Automatic firmware update requested
-	    find_firmware_update /mnt
-	    update_status=$?
-	    if [ ${update_status} -eq 1 ]; then
-		menu &
-		exit 1
-	    fi
-	    if [ ${update_status} -eq 2 ]; then
-		notif display 10 "      MULTIPLE UPDATE FILES^       KEEP ONLY ONE .FWU"
-		menu &
-		exit 1
-	    fi
-	    if ! install_firmware_update "${FIRMWARE_UPDATE_FILE}"; then
-		notif display 10 "         CORRUPTED^        UPDATE FILE"
-		menu &
-		exit 1
-	    fi
-	    notif set 0 "^^^^^^^^         RESTARTING...^^^^^^^^"
-	    normal_mode
-	else
+        keys=$(devmem 0x01c20500 16)
+        usb_debug_log recovery "boot_keys=$keys"
+        if [ "$keys" != "0xF83F" ]; then
+            # Automatic firmware update requested.
+            find_firmware_update /mnt
+            update_status=$?
+            case "$update_status" in
+                0)
+                    usb_debug_log recovery "selected_update=$FIRMWARE_UPDATE_FILE"
+                    ;;
+                1)
+                    usb_debug_set_update_state no-update
+                    usb_debug_log recovery "no firmware archive found"
+                    usb_debug_snapshot recovery-no-update
+                    recovery_menu
+                    exit 1
+                    ;;
+                2)
+                    usb_debug_set_update_state multiple-updates
+                    usb_debug_log recovery "multiple firmware archives found"
+                    usb_debug_snapshot recovery-multiple-updates
+                    notif display 10 "      MULTIPLE UPDATE FILES^       KEEP ONLY ONE .FWU"
+                    recovery_menu
+                    exit 1
+                    ;;
+            esac
 
-	    # Manual Recovery mode following Fn + Start keypress during boot
-	    menu &
-	fi
-	;;
+            if ! install_firmware_update "$FIRMWARE_UPDATE_FILE"; then
+                usb_debug_set_update_state flash-failed
+                usb_debug_log recovery "firmware installation failed"
+                usb_debug_snapshot recovery-flash-failed
+                notif display 10 "         CORRUPTED^        UPDATE FILE"
+                recovery_menu
+                exit 1
+            fi
+
+            usb_debug_set_update_state flash-complete
+            usb_debug_snapshot recovery-flash-complete
+
+            if usb_debug_should_hold_after_flash; then
+                usb_debug_log recovery "holding after successful flash"
+                if command -v funkey-debug >/dev/null 2>&1; then
+                    funkey-debug root-status >/dev/null 2>&1 ||
+                        usb_debug_log recovery "root-status reported a problem"
+                fi
+                usb_debug_set_update_state held-after-flash
+                usb_debug_snapshot recovery-held-after-flash
+                notif display 10 "      USB DEBUG HOLD^ SSH  ROOT@192.168.137.2"
+                recovery_menu
+                exit 0
+            fi
+
+            usb_debug_set_update_state booting-normal
+            notif set 0 "^^^^^^^^         RESTARTING...^^^^^^^^"
+            normal_mode
+        else
+            # Manual Recovery mode following Fn + Start keypress during boot.
+            usb_debug_set_update_state manual-recovery
+            usb_debug_log recovery "manual Fn+Start recovery"
+            usb_debug_snapshot manual-recovery
+            recovery_menu
+        fi
+        ;;
     stop)
-	;;
+        usb_debug_log recovery "shutdown"
+        usb_debug_snapshot recovery-stop
+        ;;
     *)
-	echo "Usage: $0 {start|stop}" >&2
-	exit 1
-	;;
+        echo "Usage: $0 {start|stop}" >&2
+        exit 1
+        ;;
 esac

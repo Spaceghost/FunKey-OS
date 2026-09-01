@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+version=${1:?usage: build-usb-variants VERSION}
+
+"$repo/scripts/build-usb-network-variant" "$version"
+"$repo/scripts/build-usb-debug-variant" "$version"
