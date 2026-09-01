@@ -89,11 +89,28 @@ usb_debug_flush()
     usb_debug_session_id=$(usb_debug_session)
     usb_debug_sessions_dir=$USB_DEBUG_ROOT/sessions
     usb_debug_destination=$usb_debug_sessions_dir/$usb_debug_session_id.log
-    usb_debug_temporary=$usb_debug_sessions_dir/.$usb_debug_session_id.$$.log.tmp
+    usb_debug_offset_file=${USB_DEBUG_FLUSH_OFFSET_FILE:-/var/run/usb-debug.flush-offset}
 
     mkdir -p "$usb_debug_sessions_dir" || return 1
-    cp "$USB_DEBUG_VOLATILE_LOG" "$usb_debug_temporary" || return 1
-    mv "$usb_debug_temporary" "$usb_debug_destination" || return 1
+
+    usb_debug_current_size=$(wc -c < "$USB_DEBUG_VOLATILE_LOG" 2>/dev/null) || usb_debug_current_size=0
+    usb_debug_last_size=0
+    if [ -r "$usb_debug_offset_file" ]; then
+        IFS= read -r usb_debug_last_size < "$usb_debug_offset_file" || usb_debug_last_size=0
+    fi
+    case "$usb_debug_last_size" in ''|*[!0-9]*) usb_debug_last_size=0 ;; esac
+
+    if [ ! -f "$usb_debug_destination" ] || [ "$usb_debug_last_size" -gt "$usb_debug_current_size" ]; then
+        # No persisted copy yet, or the volatile log was truncated/rotated: resync fully.
+        usb_debug_temporary=$usb_debug_sessions_dir/.$usb_debug_session_id.$$.log.tmp
+        cp "$USB_DEBUG_VOLATILE_LOG" "$usb_debug_temporary" || return 1
+        mv "$usb_debug_temporary" "$usb_debug_destination" || return 1
+    elif [ "$usb_debug_current_size" -gt "$usb_debug_last_size" ]; then
+        # Append only the bytes written since the previous flush.
+        tail -c +"$((usb_debug_last_size + 1))" "$USB_DEBUG_VOLATILE_LOG" >> "$usb_debug_destination" || return 1
+    fi
+
+    printf '%s\n' "$usb_debug_current_size" > "$usb_debug_offset_file" 2>/dev/null || :
 
     usb_debug_current_temporary=$USB_DEBUG_ROOT/.current-session.$$.tmp
     printf '%s\n' "$usb_debug_session_id" > "$usb_debug_current_temporary" || return 1
