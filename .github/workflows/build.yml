@@ -21,6 +21,9 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       LANG: en_US.UTF-8
       LC_ALL: en_US.UTF-8
+      # GitHub container jobs execute as root. GNU tar 1.29 deliberately
+      # requires this opt-in before its host-tool configure step will run.
+      FORCE_UNSAFE_CONFIGURE: "1"
 
     steps:
       - name: Install Focal build dependencies
@@ -58,9 +61,10 @@ jobs:
           ./scripts/build-usb-variants "$(make -s print-version)"
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: FunKey-OS firmware
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             images/*.fwu
             images/*.img.xz
