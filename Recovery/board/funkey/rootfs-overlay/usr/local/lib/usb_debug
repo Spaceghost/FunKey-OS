@@ -93,7 +93,8 @@ usb_debug_flush()
 
     mkdir -p "$usb_debug_sessions_dir" || return 1
 
-    usb_debug_current_size=$(wc -c < "$USB_DEBUG_VOLATILE_LOG" 2>/dev/null) || usb_debug_current_size=0
+    usb_debug_current_size=$(wc -c < "$USB_DEBUG_VOLATILE_LOG" 2>/dev/null | tr -d ' \t') || usb_debug_current_size=0
+    case "$usb_debug_current_size" in ''|*[!0-9]*) usb_debug_current_size=0 ;; esac
     usb_debug_last_size=0
     if [ -r "$usb_debug_offset_file" ]; then
         IFS= read -r usb_debug_last_size < "$usb_debug_offset_file" || usb_debug_last_size=0
