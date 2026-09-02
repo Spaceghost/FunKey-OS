@@ -44,6 +44,12 @@ jobs:
         with:
           submodules: recursive
 
+      # checkout records safe.directory in a temporary HOME that does not
+      # survive into later container shell steps. Keep the exact mounted
+      # workspace trusted so versioning and variant packaging can call Git.
+      - name: Trust the container-mounted checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
