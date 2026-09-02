@@ -2,6 +2,15 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
+<<<<<<< HEAD
+base_version=${1:?usage: build-iroh-variant VERSION}
+variant_version="${base_version}-iroh"
+manifest="$repo/tools/funkey-iroh/Cargo.toml"
+target=${FUNKEY_IROH_RUST_TARGET:-armv7-unknown-linux-musleabihf}
+toolchain=${FUNKEY_IROH_RUST_TOOLCHAIN:-1.91.0}
+host_root=${FUNKEY_IROH_HOST_ROOT:-"$repo/FunKey/output/host"}
+host_bin=${FUNKEY_IROH_HOST_BIN:-"$host_root/bin"}
+=======
 base_version=${1:?usage: build-iroh-variant VERSION [VARIANT [USB_PROFILE]]}
 variant=${2:-iroh}
 usb_profile_argument=${3:-}
@@ -10,12 +19,17 @@ manifest="$repo/tools/funkey-iroh/Cargo.toml"
 target=${FUNKEY_IROH_RUST_TARGET:-armv7-unknown-linux-musleabihf}
 toolchain=${FUNKEY_IROH_RUST_TOOLCHAIN:-1.91.0}
 host_bin=${FUNKEY_IROH_HOST_BIN:-"$repo/FunKey/output/host/bin"}
+>>>>>>> origin/feature/iroh-save-netplay
 linker=${FUNKEY_IROH_LINKER:-"$host_bin/arm-linux-gcc"}
 archiver=${FUNKEY_IROH_AR:-"$host_bin/arm-linux-ar"}
 stripper=${FUNKEY_IROH_STRIP:-"$host_bin/arm-linux-strip"}
 debugfs_bin=${DEBUGFS:-"$repo/FunKey/output/host/sbin/debugfs"}
 e2fsck_bin=${E2FSCK:-"$repo/FunKey/output/host/sbin/e2fsck"}
 readelf_bin=${READELF:-readelf}
+<<<<<<< HEAD
+filesystem_time=${SOURCE_DATE_EPOCH:-$(git -C "$repo" log -1 --format=%ct)}
+rootfs="$repo/FunKey/output/images/rootfs.ext2"
+=======
 mksquashfs_bin=${MKSQUASHFS:-"$repo/FunKey/output/host/bin/mksquashfs"}
 sdl_config=${FUNKEY_IROH_SDL_CONFIG:-"$repo/FunKey/output/staging/usr/bin/sdl-config"}
 filesystem_time=${SOURCE_DATE_EPOCH:-$(git -C "$repo" log -1 --format=%ct)}
@@ -23,12 +37,45 @@ source_commit=$(git -C "$repo" rev-parse HEAD)
 source_tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
 funkey_rootfs="$repo/FunKey/output/images/rootfs.ext2"
 recovery_rootfs="$repo/Recovery/output/images/rootfs.ext2"
+>>>>>>> origin/feature/iroh-save-netplay
 crate_dir="$repo/tools/funkey-iroh"
 ui_dir="$repo/tools/funkey-iroh-ui"
 target_dir=${CARGO_TARGET_DIR:-"$repo/.cargo-target/funkey-iroh"}
 binary="$target_dir/$target/release/funkey-iroh"
 rootfs_files="$crate_dir/target-rootfs"
 backup_dir=$(mktemp -d "$repo/.iroh-variant.XXXXXX")
+<<<<<<< HEAD
+rootfs_backup="$backup_dir/rootfs.ext2"
+ui_binary="$backup_dir/funkey-iroh-ui"
+ui_opk="$backup_dir/iroh_funkey-s.opk"
+commands="$backup_dir/debugfs.commands"
+wrapped_manifest="$backup_dir/wrapped-opks.tsv"
+
+find_host_tool()
+{
+    local name=$1
+    local candidate
+    for candidate in \
+        "$host_root/bin/$name" \
+        "$host_root/usr/bin/$name" \
+        "$host_bin/$name"
+    do
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+mksquashfs_bin=${MKSQUASHFS:-$(find_host_tool mksquashfs)}
+unsquashfs_bin=${UNSQUASHFS:-$(find_host_tool unsquashfs)}
+
+restore_rootfs()
+{
+    if [[ -e "$rootfs_backup" ]]; then
+        cp --reflink=auto --sparse=always "$rootfs_backup" "$rootfs"
+=======
 funkey_backup="$backup_dir/FunKey.rootfs.ext2"
 recovery_backup="$backup_dir/Recovery.rootfs.ext2"
 ui_binary="$backup_dir/funkey-iroh-ui"
@@ -63,14 +110,20 @@ restore_rootfs()
     fi
     if [[ -e "$recovery_backup" ]]; then
         cp --reflink=auto --sparse=always "$recovery_backup" "$recovery_rootfs"
+>>>>>>> origin/feature/iroh-save-netplay
     fi
     rm -rf "$backup_dir"
 }
 trap restore_rootfs EXIT
 
+<<<<<<< HEAD
+for tool in cargo rustc "$linker" "$archiver" "$debugfs_bin" "$e2fsck_bin" \
+    "$readelf_bin" "$mksquashfs_bin" "$unsquashfs_bin" base64
+=======
 for tool in \
     cargo rustc "$linker" "$archiver" "$debugfs_bin" "$e2fsck_bin" \
     "$readelf_bin" "$mksquashfs_bin" "$sdl_config"
+>>>>>>> origin/feature/iroh-save-netplay
 do
     if [[ "$tool" == */* ]]; then
         [[ -x "$tool" ]] || {
@@ -83,12 +136,19 @@ do
     fi
 done
 
+<<<<<<< HEAD
+[[ -f "$rootfs" ]] || {
+    printf 'completed FunKey rootfs image is missing: %s\n' "$rootfs" >&2
+    exit 2
+}
+=======
 for image in "$funkey_rootfs" "$recovery_rootfs"; do
     [[ -f "$image" ]] || {
         printf 'completed rootfs image is missing: %s\n' "$image" >&2
         exit 2
     }
 done
+>>>>>>> origin/feature/iroh-save-netplay
 [[ "$filesystem_time" =~ ^[0-9]+$ ]] || {
     printf 'invalid filesystem timestamp: %s\n' "$filesystem_time" >&2
     exit 2
@@ -152,7 +212,11 @@ if "$readelf_bin" -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
 fi
 
 binary_size=$(wc -c < "$binary")
+<<<<<<< HEAD
+max_binary_size=${FUNKEY_IROH_MAX_BINARY_BYTES:-33554432}
+=======
 max_binary_size=${FUNKEY_IROH_MAX_BINARY_BYTES:-41943040}
+>>>>>>> origin/feature/iroh-save-netplay
 if (( binary_size > max_binary_size )); then
     printf 'funkey-iroh is %d bytes, over the configured %d-byte ceiling\n' \
         "$binary_size" "$max_binary_size" >&2
@@ -160,6 +224,156 @@ if (( binary_size > max_binary_size )); then
 fi
 binary_sha=$(sha256sum "$binary" | awk '{print $1}')
 
+<<<<<<< HEAD
+printf 'building SDL launcher UI for RG Nano\n'
+"$linker" \
+    -Os -std=gnu99 -Wall -Wextra \
+    -ffunction-sections -fdata-sections \
+    -o "$ui_binary" "$ui_dir/main.c" \
+    -Wl,--gc-sections \
+    -lSDL_ttf -lSDL -lasound -lm
+
+if [[ -x "$stripper" ]]; then
+    "$stripper" --strip-unneeded "$ui_binary"
+fi
+if ! file "$ui_binary" | grep -q 'ARM'; then
+    file "$ui_binary" >&2
+    printf 'funkey-iroh-ui is not an ARM executable\n' >&2
+    exit 1
+fi
+ui_binary_size=$(wc -c < "$ui_binary")
+max_ui_size=${FUNKEY_IROH_MAX_UI_BYTES:-4194304}
+if (( ui_binary_size > max_ui_size )); then
+    printf 'funkey-iroh-ui is %d bytes, over the configured %d-byte ceiling\n' \
+        "$ui_binary_size" "$max_ui_size" >&2
+    exit 1
+fi
+ui_binary_sha=$(sha256sum "$ui_binary" | awk '{print $1}')
+
+ui_opk_root="$backup_dir/ui-opk"
+mkdir -p "$ui_opk_root"
+cp "$ui_dir/opk/iroh.funkey-s.desktop" "$ui_opk_root/"
+cp "$ui_dir/opk/README.txt" "$ui_opk_root/"
+base64 -d "$ui_dir/opk/iroh.png.b64" > "$ui_opk_root/iroh.png"
+"$mksquashfs_bin" "$ui_opk_root" "$ui_opk" \
+    -all-root -noappend -no-exports -no-xattrs >/dev/null
+ui_opk_sha=$(sha256sum "$ui_opk" | awk '{print $1}')
+
+chmod 0755 \
+    "$rootfs_files/etc/init.d/S44funkey-iroh" \
+    "$rootfs_files/etc/init.d/S45funkey-iroh-sync" \
+    "$rootfs_files/usr/bin/funkey-iroh-service" \
+    "$rootfs_files/usr/bin/funkey-iroh-pairing" \
+    "$rootfs_files/usr/bin/funkey-iroh-sync-peer" \
+    "$rootfs_files/usr/bin/funkey-iroh-inbox" \
+    "$rootfs_files/usr/bin/funkey-iroh-outbox" \
+    "$rootfs_files/usr/bin/funkey-iroh-postgame" \
+    "$rootfs_files/usr/bin/funkey-iroh-sync-worker" \
+    "$rootfs_files/usr/bin/funkey-iroh-session" \
+    "$rootfs_files/usr/bin/funkey-iroh-launch"
+
+cp --reflink=auto --sparse=always "$rootfs" "$rootfs_backup"
+: > "$commands"
+: > "$wrapped_manifest"
+
+cat >> "$commands" <<EOF
+mkdir /usr/lib/funkey-iroh
+mkdir /etc/funkey-iroh
+write $binary /usr/bin/funkey-iroh
+write $ui_binary /usr/bin/funkey-iroh-ui
+write $rootfs_files/usr/bin/funkey-iroh-service /usr/bin/funkey-iroh-service
+write $rootfs_files/usr/bin/funkey-iroh-pairing /usr/bin/funkey-iroh-pairing
+write $rootfs_files/usr/bin/funkey-iroh-sync-peer /usr/bin/funkey-iroh-sync-peer
+write $rootfs_files/usr/bin/funkey-iroh-inbox /usr/bin/funkey-iroh-inbox
+write $rootfs_files/usr/bin/funkey-iroh-outbox /usr/bin/funkey-iroh-outbox
+write $rootfs_files/usr/bin/funkey-iroh-postgame /usr/bin/funkey-iroh-postgame
+write $rootfs_files/usr/bin/funkey-iroh-sync-worker /usr/bin/funkey-iroh-sync-worker
+write $rootfs_files/usr/bin/funkey-iroh-session /usr/bin/funkey-iroh-session
+write $rootfs_files/usr/bin/funkey-iroh-launch /usr/bin/funkey-iroh-launch
+write $rootfs_files/usr/lib/funkey-iroh/common.sh /usr/lib/funkey-iroh/common.sh
+write $rootfs_files/etc/init.d/S44funkey-iroh /etc/init.d/S44funkey-iroh
+write $rootfs_files/etc/init.d/S45funkey-iroh-sync /etc/init.d/S45funkey-iroh-sync
+write $rootfs_files/etc/default/funkey-iroh /etc/default/funkey-iroh
+write $rootfs_files/etc/funkey-iroh/adapters.tsv /etc/funkey-iroh/adapters.tsv
+write $ui_opk /usr/local/share/OPKs/Settings/iroh_funkey-s.opk
+EOF
+
+wrap_picoarch_opks()
+{
+    local source_root="$repo/FunKey/package/picoarch/opk"
+    local source_directory system embedded local_opk unpack desktop original patched_opk
+    local count=0
+
+    mkdir -p "$backup_dir/opks" "$backup_dir/unpacked"
+    for source_directory in "$source_root"/*; do
+        [[ -d "$source_directory" ]] || continue
+        system=$(basename "$source_directory")
+        embedded="/usr/local/share/OPKs/Libretro/${system}_picoarch_funkey-s.opk"
+        local_opk="$backup_dir/opks/${system}.opk"
+        unpack="$backup_dir/unpacked/$system"
+        patched_opk="$backup_dir/opks/${system}.wrapped.opk"
+
+        if ! "$debugfs_bin" -R "dump $embedded $local_opk" "$rootfs" \
+            >/dev/null 2>&1; then
+            continue
+        fi
+
+        rm -rf "$unpack"
+        "$unsquashfs_bin" -no-progress -d "$unpack" "$local_opk" >/dev/null
+        desktop=$(find "$unpack" -maxdepth 2 -type f -name '*.desktop' -print -quit)
+        [[ -n "$desktop" ]] || {
+            printf 'no desktop entry found inside %s\n' "$embedded" >&2
+            exit 1
+        }
+        original=$(sed -n 's/^Exec=//p' "$desktop" | head -n 1)
+        [[ -n "$original" ]] || {
+            printf 'desktop entry has no Exec line: %s\n' "$desktop" >&2
+            exit 1
+        }
+
+        if ! grep -q 'funkey-iroh-launch' "$desktop"; then
+            sed -i \
+                "s#^Exec=.*#Exec=/usr/bin/funkey-iroh-launch --system $system -- $original#" \
+                "$desktop"
+        fi
+        if ! grep -q '^X-FunKey-Iroh-System=' "$desktop"; then
+            printf 'X-FunKey-Iroh-System=%s\n' "$system" >> "$desktop"
+        fi
+
+        rm -f "$patched_opk"
+        "$mksquashfs_bin" "$unpack" "$patched_opk" \
+            -all-root -noappend -no-exports -no-xattrs >/dev/null
+
+        {
+            printf 'rm %s\n' "$embedded"
+            printf 'write %s %s\n' "$patched_opk" "$embedded"
+        } >> "$commands"
+        printf '%s\t%s\t%s\n' \
+            "$system" "$embedded" "$(sha256sum "$patched_opk" | awk '{print $1}')" \
+            >> "$wrapped_manifest"
+        count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
+
+wrapped_count=$(wrap_picoarch_opks)
+
+E2FSPROGS_FAKE_TIME="$filesystem_time" \
+    "$debugfs_bin" -w -f "$commands" "$rootfs" >"$backup_dir/debugfs.log" 2>&1 || {
+        cat "$backup_dir/debugfs.log" >&2
+        exit 1
+    }
+
+dump_and_compare()
+{
+    local embedded_path=$1
+    local source_path=$2
+    local label=$3
+    local dump_path="$backup_dir/$label.embedded"
+
+    "$debugfs_bin" -R "dump $embedded_path $dump_path" "$rootfs" >/dev/null 2>&1 || {
+        printf 'failed to read injected file %s back from rootfs\n' "$embedded_path" >&2
+=======
 read -r -a ui_cflags <<<"$("$sdl_config" --cflags)"
 read -r -a ui_libs <<<"$("$sdl_config" --libs)"
 "$linker" \
@@ -272,11 +486,48 @@ dump_and_compare()
     "$debugfs_bin" -R "dump $embedded_path $dump_path" "$image" >/dev/null 2>&1 || {
         printf 'failed to read injected file %s back from %s\n' \
             "$embedded_path" "$image" >&2
+>>>>>>> origin/feature/iroh-save-netplay
         exit 1
     }
     cmp "$source_path" "$dump_path"
 }
 
+<<<<<<< HEAD
+dump_and_compare /usr/bin/funkey-iroh "$binary" daemon
+dump_and_compare /usr/bin/funkey-iroh-ui "$ui_binary" ui
+dump_and_compare /usr/bin/funkey-iroh-service \
+    "$rootfs_files/usr/bin/funkey-iroh-service" service
+dump_and_compare /usr/bin/funkey-iroh-launch \
+    "$rootfs_files/usr/bin/funkey-iroh-launch" launch
+dump_and_compare /usr/bin/funkey-iroh-inbox \
+    "$rootfs_files/usr/bin/funkey-iroh-inbox" inbox
+dump_and_compare /etc/init.d/S44funkey-iroh \
+    "$rootfs_files/etc/init.d/S44funkey-iroh" init
+dump_and_compare /etc/init.d/S45funkey-iroh-sync \
+    "$rootfs_files/etc/init.d/S45funkey-iroh-sync" sync-init
+dump_and_compare /etc/default/funkey-iroh \
+    "$rootfs_files/etc/default/funkey-iroh" config
+dump_and_compare /usr/local/share/OPKs/Settings/iroh_funkey-s.opk \
+    "$ui_opk" ui-opk
+
+while IFS=$'\t' read -r system embedded expected_sha; do
+    [[ -n "$system" ]] || continue
+    dumped="$backup_dir/opks/${system}.verified.opk"
+    "$debugfs_bin" -R "dump $embedded $dumped" "$rootfs" >/dev/null 2>&1
+    actual_sha=$(sha256sum "$dumped" | awk '{print $1}')
+    [[ "$actual_sha" == "$expected_sha" ]] || {
+        printf 'wrapped OPK verification failed for %s\n' "$system" >&2
+        exit 1
+    }
+done < "$wrapped_manifest"
+
+fsck_status=0
+E2FSPROGS_FAKE_TIME="$filesystem_time" E2FSCK_TIME="$filesystem_time" \
+    "$e2fsck_bin" -pf "$rootfs" >/dev/null || fsck_status=$?
+if (( fsck_status > 1 )); then
+    exit "$fsck_status"
+fi
+=======
 dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh "$binary" binary
 dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-ui "$ui_binary" ui
 dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-service \
@@ -300,20 +551,41 @@ for image in "$funkey_rootfs" "$recovery_rootfs"; do
         exit "$fsck_status"
     fi
 done
+>>>>>>> origin/feature/iroh-save-netplay
 
 make -C "$repo" -j1 package-image package-update package-checksums \
     FUNKEY_VERSION="$variant_version"
 
+<<<<<<< HEAD
+ui_artifact="$repo/images/funkey-iroh-ui-${variant_version}"
+ui_opk_artifact="$repo/images/iroh-ui-${variant_version}.opk"
+cp "$ui_binary" "$ui_artifact"
+cp "$ui_opk" "$ui_opk_artifact"
+touch -d "@$filesystem_time" "$ui_artifact" "$ui_opk_artifact" 2>/dev/null || :
+=======
 # Re-render the common footprint artifact against the explicitly named Iroh
 # budget. The normal package-checksums gate has already passed, so this can
 # only keep or tighten limits unless the reviewed budget is deliberately
 # changed in the same pull request.
 "$repo/scripts/firmware-size-report" "$variant_version" \
     --budget "$size_budget"
+>>>>>>> origin/feature/iroh-save-netplay
 
 metadata="$repo/images/iroh-${variant_version}.json"
 cat > "$metadata.tmp" <<EOF
 {
+<<<<<<< HEAD
+  "profile": "iroh",
+  "firmware_version": "$variant_version",
+  "daemon": "/usr/bin/funkey-iroh",
+  "daemon_bytes": $binary_size,
+  "daemon_sha256": "$binary_sha",
+  "ui": "/usr/bin/funkey-iroh-ui",
+  "ui_bytes": $ui_binary_size,
+  "ui_sha256": "$ui_binary_sha",
+  "ui_opk_sha256": "$ui_opk_sha",
+  "wrapped_picoarch_launchers": $wrapped_count,
+=======
   "schema": 2,
   "profile": "$variant",
   "firmware_version": "$variant_version",
@@ -326,22 +598,40 @@ cat > "$metadata.tmp" <<EOF
   "ui_bytes": $ui_size,
   "ui_sha256": "$ui_sha",
   "library": "/mnt/FunKey/Shared Games",
+>>>>>>> origin/feature/iroh-save-netplay
   "rust_target": "$target",
   "rust_version": "$rust_version",
   "iroh_version": "1.0.3",
   "save_protocol": "funkey/saves/1",
+<<<<<<< HEAD
+  "netplay_protocol": "funkey/netplay/1"
+=======
   "bundle_protocol": "funkey/bundles/1",
   "netplay_protocol": "funkey/netplay/1",
   "usb_profile": "$(basename "${usb_profile:-unchanged}")"
+>>>>>>> origin/feature/iroh-save-netplay
 }
 EOF
 mv "$metadata.tmp" "$metadata"
 
 (
     cd "$repo/images"
+<<<<<<< HEAD
+    sha256sum \
+        "$(basename "$metadata")" \
+        "$(basename "$ui_artifact")" \
+        "$(basename "$ui_opk_artifact")" \
+        >> "SHA256SUMS-${variant_version}.txt"
+=======
     sha256sum "$(basename "$metadata")" >> "SHA256SUMS-${variant_version}.txt"
+>>>>>>> origin/feature/iroh-save-netplay
 )
 
 printf 'created Iroh firmware variant %s\n' "$variant_version"
 printf 'daemon: %s bytes sha256=%s\n' "$binary_size" "$binary_sha"
+<<<<<<< HEAD
+printf 'ui: %s bytes sha256=%s\n' "$ui_binary_size" "$ui_binary_sha"
+printf 'wrapped PicoArch launchers: %s\n' "$wrapped_count"
+=======
 printf 'UI: %s bytes sha256=%s\n' "$ui_size" "$ui_sha"
+>>>>>>> origin/feature/iroh-save-netplay

@@ -2,6 +2,7 @@
 FUNKEY_IROH_STATE_DIR=/mnt/.funkey-iroh
 FUNKEY_IROH_INBOX=/mnt/.funkey-iroh/inbox
 FUNKEY_IROH_BUNDLE_INBOX=/mnt/.funkey-iroh/bundle-inbox
+FUNKEY_IROH_PUBLIC_DIR=/mnt/FunKey/Iroh
 FUNKEY_IROH_LIBRARY="/mnt/FunKey/Shared Games"
 FUNKEY_IROH_PAIRING_DIR=/mnt/FunKey/Pairing
 
@@ -13,6 +14,14 @@ FUNKEY_IROH_MAX_INCOMING_CONNECTIONS=4
 FUNKEY_IROH_HANDSHAKE_TIMEOUT=15
 FUNKEY_IROH_ONLINE_TIMEOUT=8
 FUNKEY_IROH_LOG_MAX_BYTES=1048576
+
+# Background post-game outbox and safe inbox processing.
+FUNKEY_IROH_SYNC_POLL_SECONDS=10
+FUNKEY_IROH_SYNC_RETRY_SECONDS=60
+
+# Firmware-provided and user-provided multiplayer adapter registries.
+FUNKEY_IROH_SYSTEM_ADAPTERS=/etc/funkey-iroh/adapters.tsv
+FUNKEY_IROH_USER_ADAPTERS=/mnt/.funkey-iroh/adapters.tsv
 
 # Paired-only is the release default. Additional daemon arguments may be
 # supplied for supervised debugging, for example --allow-unpaired.
