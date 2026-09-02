@@ -129,7 +129,7 @@ for arg in "$@"; do
 		-Wl,-T|-Wl,-Ttext)
 			args+=("$arg")
 			next_is_linker_value=true ;;
-		--target=arm-linux|--gcc-toolchain=*|--prefix=*)
+		--target=arm-linux|--target=arm-unknown-linux-musleabihf|--gcc-toolchain=*|--prefix=*)
 			;;
 		--gc-sections|--no-dynamic-linker|-Bstatic)
 			args+=("-Wl,$arg") ;;

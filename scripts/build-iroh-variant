@@ -5,7 +5,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 base_version=${1:?usage: build-iroh-variant VERSION}
 variant_version="${base_version}-iroh"
 manifest="$repo/tools/funkey-iroh/Cargo.toml"
-target=${FUNKEY_IROH_RUST_TARGET:-armv7-unknown-linux-musleabihf}
+target=${FUNKEY_IROH_RUST_TARGET:-arm-unknown-linux-musleabihf}
 toolchain=${FUNKEY_IROH_RUST_TOOLCHAIN:-1.91.0}
 host_root=${FUNKEY_IROH_HOST_ROOT:-"$repo/FunKey/output/host"}
 host_bin=${FUNKEY_IROH_HOST_BIN:-"$host_root/bin"}
@@ -107,10 +107,10 @@ fi
 
 mkdir -p "$target_dir"
 export CARGO_TARGET_DIR="$target_dir"
-export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$linker"
-export CC_armv7_unknown_linux_musleabihf="$linker"
-export AR_armv7_unknown_linux_musleabihf="$archiver"
-export CFLAGS_armv7_unknown_linux_musleabihf="-mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard"
+export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$linker"
+export CC_arm_unknown_linux_musleabihf="$linker"
+export AR_arm_unknown_linux_musleabihf="$archiver"
+export CFLAGS_arm_unknown_linux_musleabihf="-mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard"
 export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=cortex-a7 -C target-feature=+neon,+vfp4 -C link-arg=-Wl,--gc-sections"
 
 printf 'building funkey-iroh with %s for %s\n' "$rust_version" "$target"

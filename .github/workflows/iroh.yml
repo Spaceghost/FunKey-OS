@@ -62,7 +62,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          targets: armv7-unknown-linux-musleabihf
+          targets: arm-unknown-linux-musleabihf
 
       - name: Show pinned toolchains
         run: |
@@ -86,7 +86,7 @@ jobs:
 
       - name: Inspect target executables
         run: |
-          daemon=.cargo-target/funkey-iroh/armv7-unknown-linux-musleabihf/release/funkey-iroh
+          daemon=.cargo-target/funkey-iroh/arm-unknown-linux-musleabihf/release/funkey-iroh
           ui=$(find images -maxdepth 1 -type f -name 'funkey-iroh-ui-*-iroh' -print -quit)
           test -n "$ui"
           file "$daemon" "$ui"
@@ -111,5 +111,5 @@ jobs:
             images/funkey-iroh-ui-*-iroh
             images/iroh-ui-*-iroh.opk
             tools/funkey-iroh/Cargo.lock
-            .cargo-target/funkey-iroh/armv7-unknown-linux-musleabihf/release/funkey-iroh
+            .cargo-target/funkey-iroh/arm-unknown-linux-musleabihf/release/funkey-iroh
             br.log
