@@ -173,9 +173,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo build \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked \
+            --bin funkey-iroh
           cargo test \
             --manifest-path tools/funkey-iroh/Cargo.toml \
             --locked
+          test -x .cargo-target/funkey-iroh/debug/funkey-iroh
           cc -std=gnu99 -O2 -Wall -Wextra -Werror \
             $(sdl-config --cflags) \
             tools/funkey-iroh-ui/main.c \
