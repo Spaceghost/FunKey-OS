@@ -424,14 +424,11 @@ pub fn sanitize_component(input: &str) -> String {
         }
     }
 
-    while matches!(output.chars().last(), Some('.' | '-' | '_')) {
-        output.pop();
-    }
-    while output.starts_with('.') {
-        output.remove(0);
-    }
+    let output = output
+        .trim_matches(|character| matches!(character, '.' | '-' | '_'))
+        .to_owned();
 
-    if output.is_empty() || output == "." || output == ".." {
+    if output.is_empty() {
         "unnamed".to_owned()
     } else {
         output
