@@ -1,0 +1,164 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+root="$repo/tools/funkey-iroh/target-rootfs"
+common="$root/usr/lib/funkey-iroh/common.sh"
+pairing="$root/usr/bin/funkey-iroh-pairing"
+sync_peer="$root/usr/bin/funkey-iroh-sync-peer"
+inbox="$root/usr/bin/funkey-iroh-inbox"
+outbox="$root/usr/bin/funkey-iroh-outbox"
+postgame="$root/usr/bin/funkey-iroh-postgame"
+
+for script in \
+    "$pairing" "$sync_peer" "$inbox" "$outbox" "$postgame" \
+    "$root/usr/bin/funkey-iroh-launch" \
+    "$root/usr/bin/funkey-iroh-session" \
+    "$root/usr/bin/funkey-iroh-service" \
+    "$root/usr/bin/funkey-iroh-sync-worker" \
+    "$root/etc/init.d/S44funkey-iroh" \
+    "$root/etc/init.d/S45funkey-iroh-sync" \
+    "$common"
+do
+    dash -n "$script"
+    busybox sh -n "$script"
+done
+bash -n "$repo/scripts/build-iroh-firmware" "$repo/scripts/build-iroh-variant"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+data="$tmp/mnt"
+state="$data/.funkey-iroh"
+public="$data/FunKey/Iroh"
+bin="$tmp/bin"
+mkdir -p "$state" "$public" "$bin"
+
+cat > "$bin/fake-daemon" <<'EOF'
+#!/bin/sh
+db=${FAKE_PEER_DB:?}
+case "$1" in
+    id)
+        printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        ;;
+    peer)
+        case "$2" in
+            list)
+                [ -r "$db" ] && cat "$db"
+                ;;
+            add)
+                name=$3
+                ticket=$4
+                id=$(printf '%s' "$ticket" | sha256sum | cut -c1-64)
+                awk -F '\t' -v name="$name" '$1 != name' "$db" 2>/dev/null > "$db.tmp" || :
+                printf '%s\t%s\t%s\n' "$name" "$id" "$ticket" >> "$db.tmp"
+                mv "$db.tmp" "$db"
+                printf '%s\t%s\n' "$name" "$id"
+                ;;
+            remove)
+                name=$3
+                awk -F '\t' -v name="$name" '$1 != name' "$db" > "$db.tmp"
+                mv "$db.tmp" "$db"
+                printf 'removed %s\n' "$name"
+                ;;
+        esac
+        ;;
+    *)
+        exit 64
+        ;;
+esac
+EOF
+
+cat > "$bin/fake-service" <<'EOF'
+#!/bin/sh
+case "$1" in
+    ticket)
+        printf '%s\n' endpointown0000000000000000000000000000000000000000000000000000
+        ;;
+    send)
+        printf '%s\n' "$*" >> "${FAKE_SEND_LOG:?}"
+        ;;
+    *)
+        exit 64
+        ;;
+esac
+EOF
+chmod +x "$bin/fake-daemon" "$bin/fake-service"
+
+export FUNKEY_IROH_ASSUME_MOUNTED=1
+export FUNKEY_IROH_DATA_ROOT="$data"
+export FUNKEY_IROH_STATE_DIR="$state"
+export FUNKEY_IROH_INBOX="$state/inbox"
+export FUNKEY_IROH_PUBLIC_DIR="$public"
+export FUNKEY_IROH_DAEMON="$bin/fake-daemon"
+export FUNKEY_IROH_SERVICE="$bin/fake-service"
+export FUNKEY_IROH_COMMON="$common"
+export FAKE_PEER_DB="$tmp/peers.tsv"
+export FAKE_SEND_LOG="$tmp/send.log"
+: > "$FAKE_PEER_DB"
+: > "$FAKE_SEND_LOG"
+
+pair_output=$("$pairing" export)
+grep -q '^rg-nano-' <<<"$pair_output"
+test -f "$public/Pairing/rg-nano-aaaaaaaa.pair"
+
+cat > "$public/Pairing/pocket.pair" <<'EOF'
+FUNKEY-IROH-PAIRING 1
+name=pocket
+endpoint_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ticket=endpointremote00000000000000000000000000000000000000000000000000
+EOF
+import_output=$("$pairing" import)
+grep -q '^IMPORTED' <<<"$import_output"
+peer_output=$("$FUNKEY_IROH_DAEMON" peer list)
+grep -q '^pocket	' <<<"$peer_output"
+
+toggle_output=$("$sync_peer" toggle pocket)
+grep -q '^enable' <<<"$toggle_output"
+sync_output=$("$sync_peer" list)
+grep -q '^1	pocket	' <<<"$sync_output"
+
+mkdir -p "$state/inbox/pocket/gbc/Pokemon_Crystal"
+mkdir -p "$state/games/gbc/Pokemon_Crystal"
+mkdir -p "$data/Saves"
+printf 'local-old\n' > "$data/Saves/Pokemon_Crystal.sav"
+printf '%s\n' "$data/Saves/Pokemon_Crystal.sav" \
+    > "$state/games/gbc/Pokemon_Crystal/targets"
+printf 'remote-new\n' \
+    > "$state/inbox/pocket/gbc/Pokemon_Crystal/Pokemon_Crystal.sav"
+
+inbox_output=$("$inbox" list)
+grep -q 'Pokemon_Crystal.sav' <<<"$inbox_output"
+install_output=$("$inbox" install \
+    "$state/inbox/pocket/gbc/Pokemon_Crystal/Pokemon_Crystal.sav")
+grep -q '^INSTALLED' <<<"$install_output"
+grep -q '^remote-new$' "$data/Saves/Pokemon_Crystal.sav"
+test -n "$(find "$state/backups" -type f -print -quit)"
+
+# Safe auto-apply succeeds only while the local target still matches the
+# baseline recorded for this peer.
+baseline=$(
+    FUNKEY_IROH_BASELINES="$state/baselines" \
+    sh -c '. "$1"; iroh_baseline_path pocket gbc Pokemon_Crystal Pokemon_Crystal.sav' \
+    sh "$common"
+)
+mkdir -p "$(dirname "$baseline")"
+sha256sum "$data/Saves/Pokemon_Crystal.sav" | awk '{print $1}' > "$baseline"
+printf 'remote-newer\n' \
+    > "$state/inbox/pocket/gbc/Pokemon_Crystal/Pokemon_Crystal.sav"
+: > "$state/auto-apply"
+"$inbox" auto
+grep -q '^remote-newer$' "$data/Saves/Pokemon_Crystal.sav"
+
+# A post-game change is queued, not sent synchronously from the launcher.
+marker="$tmp/start"
+touch -d '@1' "$marker"
+sleep 1
+printf 'played-again\n' > "$data/Saves/Pokemon_Crystal.sav"
+postgame_output=$("$postgame" gbc Pokemon_Crystal "$data/Pokemon_Crystal.gbc" "$marker")
+grep -q 'queued=1' <<<"$postgame_output"
+test "$("$outbox" count)" = 1
+"$outbox" flush-one
+grep -q '^send pocket gbc Pokemon_Crystal ' "$FAKE_SEND_LOG"
+test "$("$outbox" count)" = 0
+
+printf '%s\n' 'Iroh UI helper tests passed'
