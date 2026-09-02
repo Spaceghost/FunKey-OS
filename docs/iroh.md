@@ -302,13 +302,25 @@ bundled core. GB/GBC/GBA serial-link adapters are therefore a separate
 emulator patch. The transport, identity, pairing, direct/relay path, and UI
 session lifecycle are already reusable.
 
+## Debug firmware and recovery
+
+The `-iroh-usb-debug` images are hardware-validation artifacts, not public
+release images. They keep the USB debug path enabled so a host can reach the
+handheld after boot.
+
+If candidate userspace does not become usable, power the RG Nano off, then
+hold **Fn + Start** while powering it on to enter Recovery. Keep the USB cable
+connected and use the persistent USB-debug recovery path to inspect or reflash
+the device. Automatic watchdog rollback is planned, but the manual chord is
+the initial recovery contract and must remain available as an override.
+
 ## Build
 
 Iroh 1.0.3 requires Rust 1.91:
 
 ```sh
 rustup toolchain install 1.91.0 --profile minimal \
-  --target armv7-unknown-linux-musleabihf
+  --target arm-unknown-linux-musleabihf
 ./scripts/build-iroh-firmware
 ```
 
