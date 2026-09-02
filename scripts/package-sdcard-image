@@ -1,0 +1,126 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=${FUNKEY_REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+version=${1:?usage: package-sdcard-image VERSION [CONFIG GENERATED_IMAGE ARTIFACT_STEM [COMPRESS]]}
+config=${2:-genimage.cfg}
+generated_image=${3:-sdcard.img}
+artifact_stem=${4:-FunKey-sdcard-$version}
+compress=${5:-xz}
+
+case "$compress" in
+    xz|none) ;;
+    *)
+        printf 'unsupported image compression mode: %s\n' "$compress" >&2
+        exit 2
+        ;;
+esac
+
+seed=${FUNKEY_CONTENT_SEED:-$repo/content/bootstrap/funkey_files.zip}
+normal_rootfs=${FUNKEY_ROOTFS_IMAGE:-$repo/FunKey/output/images/rootfs.ext2}
+genimage_bin=${GENIMAGE:-$repo/Recovery/output/host/bin/genimage}
+debugfs_bin=${DEBUGFS:-$repo/FunKey/output/host/sbin/debugfs}
+e2fsck_bin=${E2FSCK:-$repo/FunKey/output/host/sbin/e2fsck}
+filesystem_time=${SOURCE_DATE_EPOCH:-$(git -C "$repo" log -1 --format=%ct 2>/dev/null || printf '0')}
+
+for file in "$seed" "$normal_rootfs" "$repo/$config"; do
+    if [[ ! -f "$file" ]]; then
+        printf 'required SD-image input is missing: %s\n' "$file" >&2
+        exit 2
+    fi
+done
+for tool in "$genimage_bin" "$debugfs_bin" "$e2fsck_bin"; do
+    if [[ ! -x "$tool" ]]; then
+        printf 'required SD-image tool is missing or not executable: %s\n' "$tool" >&2
+        exit 127
+    fi
+done
+if [[ ! "$filesystem_time" =~ ^[0-9]+$ ]]; then
+    printf 'invalid filesystem timestamp: %s\n' "$filesystem_time" >&2
+    exit 2
+fi
+
+work=$(mktemp -d "$repo/.sdcard-image.XXXXXX")
+cleanup() {
+    rm -rf "$work"
+}
+trap cleanup EXIT HUP INT TERM
+
+stage=$work/input
+mkdir -p \
+    "$stage/FunKey/output/images" \
+    "$stage/Recovery/output/images" \
+    "$work/root" \
+    "$work/tmp" \
+    "$repo/images"
+
+link_image_inputs() {
+    local source_dir=$1
+    local destination_dir=$2
+    local source
+
+    shopt -s nullglob
+    for source in "$source_dir"/*; do
+        ln -s "$source" "$destination_dir/$(basename "$source")"
+    done
+    shopt -u nullglob
+}
+
+link_image_inputs "$repo/Recovery/output/images" "$stage/Recovery/output/images"
+link_image_inputs "$repo/FunKey/output/images" "$stage/FunKey/output/images"
+
+# The immutable Buildroot rootfs is the routine-update payload and contains
+# only an empty ZIP placeholder. Seed a private copy for full SD images so the
+# first boot can populate /mnt without making every later FWU carry the pack.
+rm -f \
+    "$stage/FunKey/output/images/rootfs.ext2" \
+    "$stage/FunKey/output/images/rootfs.ext4"
+seeded_rootfs=$stage/FunKey/output/images/rootfs.ext4
+cp --reflink=auto --sparse=always "$normal_rootfs" "$seeded_rootfs"
+
+commands=$work/debugfs.commands
+{
+    printf '%s\n' 'cd /usr/local/share'
+    printf '%s\n' 'rm funkey_files.zip'
+    printf 'write %s %s\n' "$seed" 'funkey_files.zip'
+} > "$commands"
+
+E2FSPROGS_FAKE_TIME="$filesystem_time" \
+    "$debugfs_bin" -w -f "$commands" "$seeded_rootfs" >/dev/null 2>&1
+
+extracted_seed=$work/funkey_files.zip
+"$debugfs_bin" -R \
+    "dump -p /usr/local/share/funkey_files.zip $extracted_seed" \
+    "$seeded_rootfs" >/dev/null 2>&1
+cmp "$seed" "$extracted_seed"
+
+fsck_status=0
+E2FSPROGS_FAKE_TIME="$filesystem_time" E2FSCK_TIME="$filesystem_time" \
+    "$e2fsck_bin" -pf "$seeded_rootfs" >/dev/null || fsck_status=$?
+if (( fsck_status > 1 )); then
+    exit "$fsck_status"
+fi
+
+rm -f "$repo/images/$generated_image"
+(
+    cd "$repo"
+    "$genimage_bin" --loglevel 0 --config "$repo/$config" \
+        --inputpath "$stage" --outputpath "$repo/images" \
+        --rootpath "$work/root" --tmppath "$work/tmp"
+)
+
+source_image=$repo/images/$generated_image
+artifact_image=$repo/images/$artifact_stem.img
+if [[ ! -f "$source_image" ]]; then
+    printf 'genimage did not create expected output: %s\n' "$source_image" >&2
+    exit 1
+fi
+mv -f "$source_image" "$artifact_image"
+
+case "$compress" in
+    xz)
+        xz -T0 -6 -f -k "$artifact_image"
+        ;;
+    none)
+        ;;
+esac

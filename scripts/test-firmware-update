@@ -61,4 +61,6 @@ if install_firmware_update "$update"; then
 fi
 [ "$calls" = "-c -i $update" ] || fail "installation ran after failed preflight"
 
+"$repo/scripts/test-firmware-packaging" || fail "firmware packaging tests failed"
+
 echo "firmware update selector tests passed"

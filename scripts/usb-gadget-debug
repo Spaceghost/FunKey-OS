@@ -1,0 +1,6 @@
+# Persistent hardware-debug profile: SSH/SFTP plus the traditional shared disk.
+USB_NETWORK=always
+USB_MASS_STORAGE=1
+USB_DEBUG=1
+# The host-side loop creates hold-after-flash only while it needs an inspection stop.
+USB_DEBUG_HOLD_AFTER_FLASH=0

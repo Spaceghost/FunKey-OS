@@ -2,3 +2,6 @@
 USB_NETWORK=auto
 # Keep the traditional shared-disk function in the composite USB profile.
 USB_MASS_STORAGE=1
+# Dormant unless a derived hardware-debug image enables it.
+USB_DEBUG=0
+USB_DEBUG_HOLD_AFTER_FLASH=0
