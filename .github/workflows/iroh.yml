@@ -2,7 +2,7 @@ name: FunKey-OS Iroh Build
 
 on:
   push:
-    branches: [feature/iroh-save-netplay]
+    branches: [feature/iroh-save-netplay, rg-nano-next, master]
     paths:
       - '.github/workflows/iroh.yml'
       - '.github/workflows/iroh-hardware-loop.yml'
@@ -17,7 +17,7 @@ on:
       - 'tools/funkey-iroh/**'
       - 'tools/funkey-iroh-ui/**'
   pull_request:
-    branches: [rg-nano-next]
+    branches: [rg-nano-next, master]
     paths:
       - '.github/workflows/iroh.yml'
       - '.github/workflows/iroh-hardware-loop.yml'
@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: funkey-iroh-${{ github.ref }}
@@ -103,19 +103,16 @@ jobs:
           zig version
           sdl-config --version
 
-      - name: Generate and retain the dependency lock
+      - name: Verify committed dependency lock
         shell: bash
         run: |
-          cargo generate-lockfile \
-            --manifest-path tools/funkey-iroh/Cargo.toml
-          if [[ "${{ github.event_name }}" == push ]] &&
-             [[ -n "$(git status --porcelain -- tools/funkey-iroh/Cargo.lock)" ]]; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add tools/funkey-iroh/Cargo.lock
-            git commit -m 'build: lock Iroh firmware dependencies'
-            git push origin HEAD:"$GITHUB_REF_NAME"
-          fi
+          set -euo pipefail
+          git ls-files --error-unmatch tools/funkey-iroh/Cargo.lock
+          cargo metadata \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked \
+            --format-version 1 >/dev/null
+          git diff --exit-code -- tools/funkey-iroh/Cargo.lock
 
       - name: Test native daemon, bundle transport, lifecycle helpers, and UI
         shell: bash
