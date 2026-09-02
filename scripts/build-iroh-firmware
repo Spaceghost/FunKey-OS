@@ -13,4 +13,30 @@ if [[ "${FUNKEY_IROH_BUILD_DEBUG_VARIANT:-1}" = 1 ]]; then
         "$version" \
         iroh-usb-debug \
         scripts/usb-gadget-debug
+
+    recovery_manifest="images/iroh-${version}-iroh-usb-debug-recovery.json"
+    source_commit=$(git rev-parse HEAD)
+    source_tree=$(git rev-parse 'HEAD^{tree}')
+    cat > "$recovery_manifest.tmp" <<EOF
+{
+  "schema": 1,
+  "profile": "iroh-usb-debug",
+  "source_commit": "$source_commit",
+  "source_tree": "$source_tree",
+  "automatic_rollback": false,
+  "manual_recovery_chord": "Fn + Start",
+  "manual_recovery_steps": [
+    "Power the RG Nano off.",
+    "Hold Fn + Start while powering it on to enter Recovery.",
+    "Keep USB connected and use the persistent USB-debug path to inspect or reflash the device."
+  ],
+  "automatic_recovery_follow_up": "issue #11"
+}
+EOF
+    mv "$recovery_manifest.tmp" "$recovery_manifest"
+    (
+        cd images
+        sha256sum "$(basename "$recovery_manifest")" \
+            >> "SHA256SUMS-${version}-iroh-usb-debug.txt"
+    )
 fi
