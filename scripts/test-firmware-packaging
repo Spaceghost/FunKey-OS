@@ -1,0 +1,157 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+test_dir=$(mktemp -d)
+trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
+
+fail() {
+    printf 'firmware packaging test failed: %s\n' "$*" >&2
+    exit 1
+}
+
+real_seed=$repo/content/bootstrap/funkey_files.zip
+placeholder=$repo/FunKey/board/funkey/rootfs-overlay/usr/local/share/funkey_files.zip
+[[ -f "$real_seed" ]] || fail "bootstrap content pack is missing"
+[[ $(stat -c %s "$real_seed") -gt 1048576 ]] || fail "bootstrap content pack is unexpectedly small"
+[[ -f "$placeholder" ]] || fail "rootfs ZIP placeholder is missing"
+[[ $(stat -c %s "$placeholder") -lt 1024 ]] || fail "rootfs placeholder contains the real content pack"
+python3 - "$placeholder" <<'PY'
+import sys
+import zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    if archive.namelist() != ["./"]:
+        raise SystemExit("placeholder ZIP is not a no-op archive")
+PY
+mkdir -p "$test_dir/placeholder-output"
+unzip -q -n "$placeholder" -d "$test_dir/placeholder-output" ||
+    fail "rootfs ZIP placeholder is not accepted by unzip"
+[[ -z $(find "$test_dir/placeholder-output" -mindepth 1 -print -quit) ]] ||
+    fail "rootfs ZIP placeholder creates content"
+
+fake=$test_dir/repo
+mkdir -p \
+    "$fake/content/bootstrap" \
+    "$fake/FunKey/output/images" \
+    "$fake/FunKey/output/host/sbin" \
+    "$fake/FunKey/output/target/usr/bin" \
+    "$fake/Recovery/output/images" \
+    "$fake/Recovery/output/host/bin" \
+    "$fake/Recovery/output/target/sbin" \
+    "$fake/images" \
+    "$fake/scripts"
+cp "$repo/Makefile" "$fake/Makefile"
+cp "$repo/scripts/firmware-size-report" "$fake/scripts/firmware-size-report"
+cp "$repo/scripts/firmware-size-budget.json" "$fake/scripts/firmware-size-budget.json"
+cp "$real_seed" "$fake/content/bootstrap/funkey_files.zip"
+printf 'base-rootfs\n' > "$fake/FunKey/output/images/rootfs.ext2"
+printf 'recovery-rootfs\n' > "$fake/Recovery/output/images/rootfs.ext2"
+ln -s rootfs.ext2 "$fake/Recovery/output/images/rootfs.ext4"
+printf 'uboot\n' > "$fake/Recovery/output/images/u-boot-sunxi-with-spl.bin"
+printf 'env\n' > "$fake/Recovery/output/images/u-boot-env.img"
+printf 'config {}\nimage sdcard.img {}\n' > "$fake/genimage.cfg"
+
+cat > "$fake/FunKey/output/host/sbin/debugfs" <<'MOCK'
+#!/bin/bash
+set -euo pipefail
+if [[ $1 == -w && $2 == -f ]]; then
+    commands=$3
+    image=$4
+    seed=$(awk '$1 == "write" {print $2}' "$commands")
+    cp "$seed" "$image.seed"
+    exit 0
+fi
+if [[ $1 == -R ]]; then
+    request=$2
+    image=$3
+    destination=${request##* }
+    cp "$image.seed" "$destination"
+    exit 0
+fi
+exit 2
+MOCK
+chmod +x "$fake/FunKey/output/host/sbin/debugfs"
+cat > "$fake/FunKey/output/host/sbin/e2fsck" <<'MOCK'
+#!/bin/sh
+exit 0
+MOCK
+chmod +x "$fake/FunKey/output/host/sbin/e2fsck"
+cat > "$fake/Recovery/output/host/bin/genimage" <<'MOCK'
+#!/bin/sh
+set -eu
+mkdir -p "$PWD/images"
+printf 'sdcard\n' > "$PWD/images/sdcard.img"
+MOCK
+chmod +x "$fake/Recovery/output/host/bin/genimage"
+
+before=$(sha256sum "$fake/FunKey/output/images/rootfs.ext2")
+FUNKEY_REPO_ROOT=$fake SOURCE_DATE_EPOCH=1 \
+    "$repo/scripts/package-sdcard-image" test
+[[ -f "$fake/images/FunKey-sdcard-test.img" ]] || fail "raw SD image was not packaged"
+[[ -f "$fake/images/FunKey-sdcard-test.img.xz" ]] || fail "compressed SD image was not packaged"
+[[ $(sha256sum "$fake/FunKey/output/images/rootfs.ext2") == "$before" ]] ||
+    fail "packaging modified the routine-update rootfs"
+
+python3 - "$fake" <<'PY'
+import json
+import os
+import struct
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+
+def image(path, blocks, free, label):
+    data = bytearray(8192)
+    sb = 1024
+    struct.pack_into('<I', data, sb + 0x00, 128)
+    struct.pack_into('<I', data, sb + 0x04, blocks)
+    struct.pack_into('<I', data, sb + 0x08, 1)
+    struct.pack_into('<I', data, sb + 0x0C, free)
+    struct.pack_into('<I', data, sb + 0x10, 64)
+    struct.pack_into('<I', data, sb + 0x18, 2)
+    struct.pack_into('<H', data, sb + 0x38, 0xEF53)
+    data[sb + 0x78:sb + 0x78 + len(label)] = label.encode()
+    path.write_bytes(data)
+
+image(root / 'FunKey/output/images/rootfs.ext2', 4096, 2048, 'FunKey')
+image(root / 'Recovery/output/images/rootfs.ext2', 2048, 1024, 'Recovery')
+(root / 'images/FunKey-rootfs-test.fwu').write_bytes(b'f' * 1024)
+# package-sdcard-image created this; make its size predictable.
+(root / 'images/FunKey-sdcard-test.img.xz').write_bytes(b'x' * 512)
+(root / 'FunKey/output/target/usr/bin/a').write_bytes(b'a' * 4096)
+os.link(root / 'FunKey/output/target/usr/bin/a', root / 'FunKey/output/target/usr/bin/a-hardlink')
+(root / 'Recovery/output/target/sbin/b').write_bytes(b'b' * 2048)
+(root / 'scripts/firmware-size-budget.json').write_text(json.dumps({
+    'artifact_bytes': {
+        'firmware_update': {'max': 2048},
+        'sd_image_xz': {'max': 2048},
+    },
+    'filesystem_used_bytes': {
+        'FunKey': {'max': 32 * 1024 * 1024},
+        'Recovery': {'max': 16 * 1024 * 1024},
+    },
+    'filesystem_free_bytes': {
+        'FunKey': {'min': 1024},
+        'Recovery': {'min': 1024},
+    },
+}, indent=2) + '\n')
+PY
+
+make -C "$fake" --no-print-directory package-checksums FUNKEY_VERSION=test >/dev/null
+report=$fake/images/packages-Firmware-size-test.json
+[[ -f "$report" ]] || fail "JSON size report was not written"
+[[ -f "$fake/images/packages-Firmware-size-test.txt" ]] || fail "text size report was not written"
+python3 - "$report" <<'PY'
+import json
+import sys
+report = json.load(open(sys.argv[1], encoding='utf-8'))
+assert report['budget']['violations'] == []
+assert report['targets']['FunKey']['duplicate_hardlink_paths'] == 1
+assert report['filesystems']['FunKey']['used_bytes'] == 8 * 1024 * 1024
+PY
+
+python3 -m py_compile "$repo/scripts/firmware-size-report"
+bash -n "$repo/scripts/package-sdcard-image" "$repo/scripts/test-firmware-packaging"
+
+echo "firmware packaging tests passed"
