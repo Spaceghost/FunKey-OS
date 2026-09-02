@@ -1,0 +1,324 @@
+#!/bin/sh
+set -u
+
+CONFIG=/etc/default/funkey-iroh
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+LIBRARY=${FUNKEY_IROH_LIBRARY:-/mnt/FunKey/Shared Games}
+BUNDLE_INBOX=${FUNKEY_IROH_BUNDLE_INBOX:-$STATE_DIR/bundle-inbox}
+SERVICE=${FUNKEY_IROH_SERVICE:-/usr/bin/funkey-iroh-service}
+LIBRARY_TOOL=${FUNKEY_IROH_LIBRARY_TOOL:-/usr/bin/funkey-iroh-library}
+DAEMON=${FUNKEY_IROH_BIN:-/usr/bin/funkey-iroh}
+PAIRING_DIR=${FUNKEY_IROH_PAIRING_DIR:-/mnt/FunKey/Pairing}
+DEFAULT_PEER=$STATE_DIR/default-peer
+AUTOSYNC=$STATE_DIR/autosync
+ENABLE_FILE=$STATE_DIR/enabled
+LAST_GAME=$STATE_DIR/last-game.tsv
+ECM_MARKER=/mnt/usbnet-ecm
+NCM_MARKER=/mnt/usbnet-ncm
+USB_MARKER=/mnt/usbnet
+QR_FILE=/tmp/funkey-iroh-ticket.pbm
+
+manifest_get()
+{
+    key=$1
+    file=$2
+    awk -F '\t' -v wanted="$key" '
+        $1 == wanted {
+            sub(/^[^\t]*\t/, "")
+            print
+            exit
+        }
+    ' "$file"
+}
+
+sanitize_name()
+{
+    printf '%s' "$1" |
+        tr '\t\r\n /\\:' '________' |
+        sed 's/[^A-Za-z0-9._-]/-/g; s/[-_][-_]*/_/g; s/^[._-]*//; s/[._-]*$//' |
+        cut -c1-48
+}
+
+count_lines()
+{
+    count=0
+    while IFS= read -r ignored; do
+        count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
+
+service_state()
+{
+    if [ ! -e "$ENABLE_FILE" ]; then
+        printf '%s\n' disabled
+    elif "$SERVICE" status >/dev/null 2>&1; then
+        printf '%s\n' running
+    else
+        printf '%s\n' stopped
+    fi
+}
+
+default_peer()
+{
+    if [ -s "$DEFAULT_PEER" ]; then
+        IFS= read -r peer < "$DEFAULT_PEER"
+        printf '%s\n' "$peer"
+    else
+        printf '%s\n' none
+    fi
+}
+
+usb_mode()
+{
+    if [ -e "$NCM_MARKER" ]; then
+        printf '%s\n' ncm
+    elif [ -e "$ECM_MARKER" ]; then
+        printf '%s\n' ecm
+    else
+        printf '%s\n' rndis
+    fi
+}
+
+last_game()
+{
+    if [ -r "$LAST_GAME" ]; then
+        content=$(manifest_get content "$LAST_GAME")
+        basename "$content"
+    else
+        printf '%s\n' none
+    fi
+}
+
+summary()
+{
+    peers=$("$DAEMON" peer list 2>/dev/null | count_lines)
+    bundles=$("$LIBRARY_TOOL" list 2>/dev/null | count_lines)
+    incoming=$("$LIBRARY_TOOL" inbox 2>/dev/null | count_lines)
+    [ -e "$AUTOSYNC" ] && autosync=on || autosync=off
+    printf 'SERVICE=%s\n' "$(service_state)"
+    printf 'PEERS=%s\n' "$peers"
+    printf 'DEFAULT_PEER=%s\n' "$(default_peer)"
+    printf 'LAST_GAME=%s\n' "$(last_game)"
+    printf 'BUNDLES=%s\n' "$bundles"
+    printf 'INCOMING=%s\n' "$incoming"
+    printf 'AUTOSYNC=%s\n' "$autosync"
+    printf 'USB_MODE=%s\n' "$(usb_mode)"
+    printf 'SFTP_HOST=192.168.137.2\n'
+    printf 'SFTP_PATH=/mnt/FunKey/Shared Games\n'
+}
+
+toggle_service()
+{
+    case "$(service_state)" in
+        disabled) "$SERVICE" enable ;;
+        running|stopped) "$SERVICE" disable ;;
+    esac
+}
+
+ticket_qr()
+{
+    mkdir -p "$PAIRING_DIR" "$PAIRING_DIR/inbox" "$PAIRING_DIR/imported"
+    ticket=$("$SERVICE" ticket) || exit $?
+    printf '%s\n' "$ticket" > "$PAIRING_DIR/rg-nano.ticket"
+    if command -v qrencode >/dev/null 2>&1; then
+        qrencode -t PBM -m 2 -o "$QR_FILE" "$ticket"
+        cp "$QR_FILE" "$PAIRING_DIR/rg-nano-ticket.pbm"
+    fi
+    "$DAEMON" id > "$PAIRING_DIR/rg-nano.endpoint-id"
+    sync
+    printf 'PAIRING FILES READY\n%s\n' "$PAIRING_DIR"
+}
+
+import_tickets()
+{
+    mkdir -p "$PAIRING_DIR/inbox" "$PAIRING_DIR/imported" "$PAIRING_DIR/failed"
+    imported=0
+    failed=0
+    for file in "$PAIRING_DIR"/inbox/*.ticket; do
+        [ -f "$file" ] || continue
+        name=$(sanitize_name "$(basename "$file" .ticket)")
+        ticket=
+        IFS= read -r ticket < "$file" || ticket=
+        if [ -n "$name" ] && [ -n "$ticket" ] &&
+            "$SERVICE" peer add "$name" "$ticket" >/dev/null 2>&1; then
+            mv "$file" "$PAIRING_DIR/imported/$name.ticket"
+            imported=$((imported + 1))
+        else
+            mv "$file" "$PAIRING_DIR/failed/$(basename "$file")"
+            failed=$((failed + 1))
+        fi
+    done
+    sync
+    printf 'IMPORTED %s  FAILED %s\n' "$imported" "$failed"
+}
+
+cycle_peer()
+{
+    peers=/tmp/funkey-iroh-peers.$$
+    "$DAEMON" peer list 2>/dev/null | awk -F '\t' 'NF { print $1 }' > "$peers"
+    first=
+    current=$(default_peer)
+    next=
+    found=0
+    while IFS= read -r peer; do
+        [ -n "$first" ] || first=$peer
+        if [ "$found" -eq 1 ]; then
+            next=$peer
+            break
+        fi
+        [ "$peer" = "$current" ] && found=1
+    done < "$peers"
+    [ -n "$next" ] || next=$first
+    rm -f "$peers"
+    [ -n "$next" ] || {
+        echo "NO PAIRED DEVICES"
+        exit 2
+    }
+    "$LIBRARY_TOOL" default-peer "$next"
+    printf 'DEFAULT PEER %s\n' "$next"
+}
+
+toggle_autosync()
+{
+    if [ -e "$AUTOSYNC" ]; then
+        "$LIBRARY_TOOL" autosync off
+        echo "AUTO-SYNC OFF"
+    else
+        [ "$(default_peer)" != none ] || {
+            echo "PAIR AND SELECT A PEER FIRST"
+            exit 2
+        }
+        "$LIBRARY_TOOL" autosync on
+        echo "AUTO-SYNC ON"
+    fi
+}
+
+snapshot_last()
+{
+    bundle=$("$LIBRARY_TOOL" snapshot-last) || exit $?
+    printf 'SNAPSHOT READY\n%s\n' "$(basename "$bundle")"
+}
+
+send_last()
+{
+    bundle=$("$LIBRARY_TOOL" snapshot-last) || exit $?
+    "$LIBRARY_TOOL" send "$bundle"
+}
+
+install_next()
+{
+    bundle=$("$LIBRARY_TOOL" inbox 2>/dev/null | head -n 1)
+    [ -n "$bundle" ] || {
+        echo "NO RECEIVED BUNDLES"
+        exit 2
+    }
+    installed=$("$LIBRARY_TOOL" install "$bundle") || exit $?
+    printf 'INSTALLED\n%s\n' "$installed"
+}
+
+cycle_usb()
+{
+    mkdir -p /mnt
+    : > "$USB_MARKER"
+    case "$(usb_mode)" in
+        rndis)
+            : > "$ECM_MARKER"
+            rm -f "$NCM_MARKER"
+            mode=ECM
+            ;;
+        ecm)
+            : > "$NCM_MARKER"
+            rm -f "$ECM_MARKER"
+            mode=NCM
+            ;;
+        *)
+            rm -f "$ECM_MARKER" "$NCM_MARKER"
+            mode=RNDIS
+            ;;
+    esac
+    sync
+    printf 'USB MODE %s\nRECONNECT OR REBOOT\n' "$mode"
+}
+
+sftp_details()
+{
+    cat <<EOF
+SFTP / SSHFS
+HOST 192.168.137.2
+USER root
+PASSWORD blank
+PATH /mnt/FunKey/Shared Games
+APPLE: TRY ECM, THEN NCM
+WINDOWS: USE RNDIS
+EOF
+}
+
+netplay_details()
+{
+    cat <<EOF
+NETPLAY TRANSPORT READY
+UDP OVER IROH: AVAILABLE
+PAIRING: $(default_peer)
+
+GAME/CORE ADAPTER REQUIRED
+NO GB/GBC/GBA LINK ADAPTER YET
+HOST/JOIN WILL APPEAR PER GAME
+AFTER HARDWARE VALIDATION
+EOF
+}
+
+diagnostics()
+{
+    printf 'SERVICE %s\n' "$(service_state)"
+    printf 'USB %s\n' "$(usb_mode)"
+    printf 'PEER %s\n' "$(default_peer)"
+    "$DAEMON" --version 2>&1
+    "$DAEMON" id 2>&1
+    if command -v ip >/dev/null 2>&1; then
+        ip address show usb0 2>&1 | sed -n '1,6p'
+    else
+        ifconfig usb0 2>&1 | sed -n '1,6p'
+    fi
+    df -h /mnt 2>&1 | tail -n 2
+}
+
+self_test()
+{
+    for command in "$SERVICE" "$LIBRARY_TOOL" "$DAEMON"; do
+        [ -x "$command" ] || {
+            echo "MISSING $command" >&2
+            exit 10
+        }
+    done
+    "$DAEMON" --version
+    "$DAEMON" peer list >/dev/null
+    summary >/tmp/funkey-iroh-ui-summary.$$
+    grep -q '^SERVICE=' /tmp/funkey-iroh-ui-summary.$$
+    grep -q '^USB_MODE=' /tmp/funkey-iroh-ui-summary.$$
+    rm -f /tmp/funkey-iroh-ui-summary.$$
+    echo "funkey-iroh-ui-action self-test: PASS"
+}
+
+case "${1:-}" in
+    summary) summary ;;
+    toggle-service) toggle_service ;;
+    ticket-qr) ticket_qr ;;
+    import-tickets) import_tickets ;;
+    cycle-peer) cycle_peer ;;
+    toggle-autosync) toggle_autosync ;;
+    snapshot-last) snapshot_last ;;
+    send-last) send_last ;;
+    install-next) install_next ;;
+    cycle-usb) cycle_usb ;;
+    sftp) sftp_details ;;
+    netplay) netplay_details ;;
+    diagnostics) diagnostics ;;
+    self-test) self_test ;;
+    *)
+        echo "Usage: $0 {summary|toggle-service|ticket-qr|import-tickets|cycle-peer|toggle-autosync|snapshot-last|send-last|install-next|cycle-usb|sftp|netplay|diagnostics|self-test}" >&2
+        exit 64
+        ;;
+esac

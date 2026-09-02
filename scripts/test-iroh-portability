@@ -1,0 +1,154 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+daemon=${1:-"$repo/.cargo-target/funkey-iroh-native/debug/funkey-iroh"}
+ui_binary=${2:-}
+
+[[ -x "$daemon" ]] || {
+    printf 'native funkey-iroh executable is missing: %s\n' "$daemon" >&2
+    exit 2
+}
+
+for script in \
+    "$repo/scripts/build-iroh-firmware" \
+    "$repo/scripts/build-iroh-variant"
+do
+    bash -n "$script"
+done
+
+for script in \
+    "$repo/tools/funkey-iroh/target-rootfs/etc/init.d/S44funkey-iroh" \
+    "$repo/tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-library" \
+    "$repo/tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-service" \
+    "$repo/tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-ui-action" \
+    "$repo/tools/funkey-iroh/target-rootfs/usr/games/picoarch-iroh-wrapper" \
+    "$repo/tools/funkey-iroh/target-rootfs/usr/local/sbin/usb_gadget"
+do
+    dash -n "$script"
+    busybox sh -n "$script"
+done
+
+work=$(mktemp -d)
+receiver_pid=
+cleanup()
+{
+    if [[ -n "$receiver_pid" ]]; then
+        kill "$receiver_pid" 2>/dev/null || true
+        wait "$receiver_pid" 2>/dev/null || true
+    fi
+    rm -rf "$work"
+}
+trap cleanup EXIT INT TERM
+
+mkdir -p \
+    "$work/a/state" \
+    "$work/a/inbox" \
+    "$work/a/bundles" \
+    "$work/b/state" \
+    "$work/source/Pokemon_Crystal.funkey/content" \
+    "$work/source/Pokemon_Crystal.funkey/retroarch/saves" \
+    "$work/source/Pokemon_Crystal.funkey/retroarch/states"
+
+printf 'portable-test-rom\n' \
+    > "$work/source/Pokemon_Crystal.funkey/content/Pokemon Crystal.gbc"
+printf 'save-v1\n' \
+    > "$work/source/Pokemon_Crystal.funkey/retroarch/saves/Pokemon Crystal.srm"
+printf 'state-v1\n' \
+    > "$work/source/Pokemon_Crystal.funkey/retroarch/states/Pokemon Crystal.state0"
+cat > "$work/source/Pokemon_Crystal.funkey/manifest.tsv" <<EOF
+schema	1
+kind	funkey-play-bundle
+system	gbc
+game	Pokemon_Crystal
+content	content/Pokemon Crystal.gbc
+source_content	/test/Pokemon Crystal.gbc
+core	gambatte
+core_path	/usr/games/gambatte_libretro.so
+core_sha256	test
+created_unix	0
+updated_unix	0
+EOF
+
+FUNKEY_IROH_STATE_DIR="$work/a/state" \
+FUNKEY_IROH_INBOX="$work/a/inbox" \
+FUNKEY_IROH_BUNDLE_INBOX="$work/a/bundles" \
+FUNKEY_IROH_LIBRARY="$work/a/library" \
+FUNKEY_IROH_ONLINE_TIMEOUT=1 \
+    "$daemon" serve --allow-unpaired \
+    >"$work/a/ticket" 2>"$work/a/server.log" &
+receiver_pid=$!
+
+for _ in $(seq 1 100); do
+    [[ -s "$work/a/ticket" ]] && break
+    kill -0 "$receiver_pid"
+    sleep 0.1
+done
+[[ -s "$work/a/ticket" ]] || {
+    cat "$work/a/server.log" >&2
+    exit 1
+}
+IFS= read -r ticket < "$work/a/ticket"
+
+send_bundle()
+{
+    FUNKEY_IROH_STATE_DIR="$work/b/state" \
+    FUNKEY_IROH_INBOX="$work/b/inbox" \
+    FUNKEY_IROH_BUNDLE_INBOX="$work/b/bundles" \
+    FUNKEY_IROH_LIBRARY="$work/b/library" \
+    FUNKEY_IROH_ONLINE_TIMEOUT=1 \
+        "$daemon" bundle send "$ticket" \
+        "$work/source/Pokemon_Crystal.funkey"
+}
+
+first_output=$(send_bundle)
+grep -q '^stored bundle on ' <<<"$first_output"
+received=$(find "$work/a/bundles" -type d -name 'Pokemon_Crystal.funkey' -print -quit)
+[[ -n "$received" ]]
+cmp \
+    "$work/source/Pokemon_Crystal.funkey/retroarch/states/Pokemon Crystal.state0" \
+    "$received/retroarch/states/Pokemon Crystal.state0"
+
+skip_output=$(send_bundle)
+grep -q '^already present on ' <<<"$skip_output"
+
+printf 'save-v2\n' \
+    > "$work/source/Pokemon_Crystal.funkey/retroarch/saves/Pokemon Crystal.srm"
+conflict_output=$(send_bundle)
+grep -q '^stored bundle conflict on ' <<<"$conflict_output"
+conflicts=$(find "$work/a/bundles" -type d -name 'Pokemon_Crystal.conflict-*.funkey' | wc -l)
+[[ "$conflicts" -eq 1 ]]
+
+FUNKEY_IROH_BIN="$daemon" \
+    "$repo/tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-library" \
+    self-test
+
+fake_service="$work/funkey-iroh-service"
+cat > "$fake_service" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    status) exit 1 ;;
+    *) exit 0 ;;
+esac
+EOF
+chmod +x "$fake_service"
+
+FUNKEY_IROH_BIN="$daemon" \
+FUNKEY_IROH_SERVICE="$fake_service" \
+FUNKEY_IROH_LIBRARY_TOOL="$repo/tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-library" \
+FUNKEY_IROH_STATE_DIR="$work/ui/state" \
+FUNKEY_IROH_LIBRARY="$work/ui/library" \
+FUNKEY_IROH_BUNDLE_INBOX="$work/ui/bundles" \
+FUNKEY_IROH_PAIRING_DIR="$work/ui/pairing" \
+    "$repo/tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-ui-action" \
+    self-test
+
+if [[ -n "$ui_binary" ]]; then
+    SDL_VIDEODRIVER=dummy "$ui_binary" --self-test
+fi
+
+kill "$receiver_pid"
+wait "$receiver_pid" || true
+receiver_pid=
+
+printf 'Iroh portable bundle, conflict, library, and UI-action tests: PASS\n'

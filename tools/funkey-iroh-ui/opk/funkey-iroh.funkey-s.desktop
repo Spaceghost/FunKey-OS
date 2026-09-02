@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Iroh Share & Play
+Comment=Pair devices, carry games and progress, and start netplay
+Icon=funkey-iroh
+Exec=/usr/bin/funkey-iroh-ui
+Categories=settings

@@ -1,10 +1,10 @@
 [package]
 name = "funkey-iroh"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.91"
 license = "GPL-2.0-or-later"
-description = "Iroh save sharing and UDP netplay transport for FunKey-OS"
+description = "Iroh portable-game sharing and UDP netplay transport for FunKey-OS"
 
 [dependencies]
 anyhow = "1.0"
