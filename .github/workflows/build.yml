@@ -24,6 +24,13 @@ jobs:
       # GitHub container jobs execute as root. GNU tar 1.29 deliberately
       # requires this opt-in before its host-tool configure step will run.
       FORCE_UNSAFE_CONFIGURE: "1"
+      # Buildroot explicitly permits these environment overrides. Keeping the
+      # caches outside output/ lets a full state invalidation retain downloads
+      # and compiler objects.
+      BR2_DL_DIR: ${{ github.workspace }}/download
+      BR2_CCACHE_DIR: ${{ github.workspace }}/.buildroot-ccache
+      CCACHE_DIR: ${{ github.workspace }}/.buildroot-ccache
+      SEGMENT_DOWNLOAD_TIMEOUT_MINS: "15"
 
     steps:
       - name: Install Focal build dependencies
@@ -35,7 +42,7 @@ jobs:
             cvs expect file gawk git gzip liblscp-dev libncurses5-dev locales \
             mercurial openssh-client patch perl procps python3 python3-dev \
             python3-distutils python3-setuptools rsync subversion tar unzip \
-            wget xxd xz-utils
+            wget xxd xz-utils zstd
           ln -sfn /usr/bin/python3 /usr/local/bin/python
           locale-gen en_US.UTF-8
           rm -rf /var/lib/apt/lists/*
@@ -44,15 +51,8 @@ jobs:
         with:
           submodules: recursive
 
-      # checkout records safe.directory in a temporary HOME that does not
-      # survive into later container shell steps. Keep the exact mounted
-      # workspace trusted so versioning and variant packaging can call Git.
       - name: Trust the container-mounted checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
 
       - name: Validate USB update and debug tooling
         run: |
@@ -61,10 +61,155 @@ jobs:
           ./scripts/test-usb-menu-info
           ./scripts/test-usb-debug
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Compute safe cache fingerprints
+        id: cache-meta
+        run: ./scripts/ci-cache-metadata >> "$GITHUB_OUTPUT"
+
+      - name: Prepare cache directories
+        run: mkdir -p download "$BR2_CCACHE_DIR" FunKey/output Recovery/output
+
+      - name: Restore Buildroot downloads
+        id: cache-downloads
+        uses: actions/cache/restore@v5
+        with:
+          path: download
+          key: funkey-downloads-v2-${{ steps.cache-meta.outputs.scope }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            funkey-downloads-v2-${{ steps.cache-meta.outputs.scope }}-
+            funkey-downloads-v2-
+
+      - name: Restore compiler cache
+        id: cache-ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: .buildroot-ccache
+          key: funkey-ccache-v2-${{ steps.cache-meta.outputs.ccache }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            funkey-ccache-v2-${{ steps.cache-meta.outputs.ccache }}-
+
+      # Whole Buildroot output trees are restored only for an exact source and
+      # host fingerprint, and are saved only after a successful build. Failed
+      # runs preserve downloads and atomic ccache entries instead of reviving
+      # arbitrary half-written package state.
+      - name: Restore exact Recovery build state
+        id: cache-recovery
+        uses: actions/cache/restore@v5
+        with:
+          path: Recovery/output
+          key: funkey-recovery-v2-${{ steps.cache-meta.outputs.recovery }}
+
+      - name: Restore exact FunKey build state
+        id: cache-funkey
+        uses: actions/cache/restore@v5
+        with:
+          path: FunKey/output
+          key: funkey-os-v2-${{ steps.cache-meta.outputs.funkey }}
+
+      - name: Report restored build state
+        shell: bash
+        run: |
+          printf 'downloads: %s\n' '${{ steps.cache-downloads.outputs.cache-matched-key }}'
+          printf 'ccache:    %s\n' '${{ steps.cache-ccache.outputs.cache-matched-key }}'
+          printf 'Recovery:  %s\n' '${{ steps.cache-recovery.outputs.cache-matched-key }}'
+          printf 'FunKey:    %s\n' '${{ steps.cache-funkey.outputs.cache-matched-key }}'
+          du -sh download .buildroot-ccache Recovery/output FunKey/output 2>/dev/null || true
+          for tool in FunKey/output/host/bin/ccache Recovery/output/host/bin/ccache; do
+            if [ -x "$tool" ]; then
+              "$tool" --zero-stats || "$tool" -z || true
+              break
+            fi
+          done
+
       - name: Build production, network-only, and persistent USB-debug profiles with Zig
         run: |
           make -j"$(nproc)" zig-all
           ./scripts/build-usb-variants "$(make -s print-version)"
+
+      - name: Save exact Recovery build state
+        if: >-
+          ${{
+            success() &&
+            steps.cache-recovery.outputs.cache-hit != 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: Recovery/output
+          key: funkey-recovery-v2-${{ steps.cache-meta.outputs.recovery }}
+
+      - name: Save exact FunKey build state
+        if: >-
+          ${{
+            success() &&
+            steps.cache-funkey.outputs.cache-hit != 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: FunKey/output
+          key: funkey-os-v2-${{ steps.cache-meta.outputs.funkey }}
+
+      - name: Report compiler-cache effectiveness
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          for tool in FunKey/output/host/bin/ccache Recovery/output/host/bin/ccache; do
+            if [ -x "$tool" ]; then
+              "$tool" -M 4G || true
+              "$tool" -c || true
+              "$tool" --show-stats || "$tool" -s || true
+              exit 0
+            fi
+          done
+          echo "ccache was not built before the job stopped"
+
+      - name: Select useful rolling caches to persist
+        id: cache-save
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          has_files() {
+            [ -d "$1" ] && [ -n "$(find "$1" -type f -print -quit 2>/dev/null)" ]
+          }
+
+          has_files download && echo 'downloads=true' >> "$GITHUB_OUTPUT"
+          has_files "$BR2_CCACHE_DIR" && echo 'ccache=true' >> "$GITHUB_OUTPUT"
+
+      - name: Save compiler cache, including successful work from failed builds
+        if: >-
+          ${{
+            !cancelled() &&
+            steps.cache-save.outputs.ccache == 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: .buildroot-ccache
+          key: funkey-ccache-v2-${{ steps.cache-meta.outputs.ccache }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save downloads, including verified files from failed builds
+        if: >-
+          ${{
+            !cancelled() &&
+            steps.cache-save.outputs.downloads == 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: download
+          key: funkey-downloads-v2-${{ steps.cache-meta.outputs.scope }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-artifact@v4
         if: always()
