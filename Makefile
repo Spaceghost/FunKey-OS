@@ -61,6 +61,7 @@ package-checksums:
 		FunKey-sdcard-$(FUNKEY_VERSION).img.xz \
 		> SHA256SUMS-$(FUNKEY_VERSION).txt.tmp && \
 	mv SHA256SUMS-$(FUNKEY_VERSION).txt.tmp SHA256SUMS-$(FUNKEY_VERSION).txt
+	@./scripts/firmware-size-report '$(FUNKEY_VERSION)'
 
 package-inventory: FunKey/output/.config Recovery/output/.config
 	@$(call MESSAGE,"Creating software package inventories")
@@ -191,22 +192,13 @@ image: fun
 # used to derive profiles that only alter files inside completed rootfs images.
 package-image:
 	@$(call MESSAGE,"Creating disk image")
-	@rm -rf root-image tmp-image
-	@mkdir -p root-image tmp-image
-	@./Recovery/output/host/bin/genimage --loglevel 0 --inputpath . \
-		--rootpath root-image --tmppath tmp-image
-	@rm -rf root-image tmp-image
-	@mv images/sdcard.img images/FunKey-sdcard-$(FUNKEY_VERSION).img
-	@xz -T0 -6 -f -k images/FunKey-sdcard-$(FUNKEY_VERSION).img
+	@./scripts/package-sdcard-image '$(FUNKEY_VERSION)'
 
 image-prod: fun
-	@$(call MESSAGE,"Creating disk image")
-	@rm -rf root-image-prod tmp-image-prod
-	@mkdir -p root-image-prod tmp-image-prod
-	@./Recovery/output/host/bin/genimage --loglevel 0 --config "genimage-prod.cfg" --inputpath . \
-		--rootpath root-image-prod --tmppath tmp-image-prod
-	@rm -rf root-image-prod tmp-image-prod
-	@mv images/sdcard-prod.img images/FunKey-sdcard-prod-$(FUNKEY_VERSION).img
+	@$(call MESSAGE,"Creating production disk image")
+	@./scripts/package-sdcard-image '$(FUNKEY_VERSION)' \
+		genimage-prod.cfg sdcard-prod.img \
+		'FunKey-sdcard-prod-$(FUNKEY_VERSION)' none
 
 update: fun
 	@$(MAKE) --no-print-directory package-update FUNKEY_VERSION='$(FUNKEY_VERSION)'

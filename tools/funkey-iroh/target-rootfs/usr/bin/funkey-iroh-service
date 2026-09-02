@@ -1,7 +1,8 @@
 #!/bin/sh
 set -u
 
-DAEMON=${FUNKEY_IROH_DAEMON:-/usr/bin/funkey-iroh}
+DAEMON=${FUNKEY_IROH_BIN:-/usr/bin/funkey-iroh}
+LIBRARY_TOOL=${FUNKEY_IROH_LIBRARY_TOOL:-/usr/bin/funkey-iroh-library}
 INIT=${FUNKEY_IROH_INIT:-/etc/init.d/S44funkey-iroh}
 SYNC_INIT=${FUNKEY_IROH_SYNC_INIT:-/etc/init.d/S45funkey-iroh-sync}
 CONFIG=${FUNKEY_IROH_CONFIG:-/etc/default/funkey-iroh}
@@ -12,6 +13,8 @@ COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
 
 FUNKEY_IROH_STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
 FUNKEY_IROH_INBOX=${FUNKEY_IROH_INBOX:-$FUNKEY_IROH_STATE_DIR/inbox}
+FUNKEY_IROH_BUNDLE_INBOX=${FUNKEY_IROH_BUNDLE_INBOX:-$FUNKEY_IROH_STATE_DIR/bundle-inbox}
+FUNKEY_IROH_LIBRARY=${FUNKEY_IROH_LIBRARY:-/mnt/FunKey/Shared Games}
 FUNKEY_IROH_RUNTIME_DIR=${FUNKEY_IROH_RUNTIME_DIR:-/var/run/funkey-iroh}
 FUNKEY_IROH_ENDPOINT_LOCK=${FUNKEY_IROH_ENDPOINT_LOCK:-/var/lock/funkey-iroh-endpoint.lock}
 FUNKEY_IROH_EXCLUSIVE=${FUNKEY_IROH_EXCLUSIVE:-$FUNKEY_IROH_RUNTIME_DIR/exclusive}
@@ -26,7 +29,13 @@ UI_OPK_TARGET=${FUNKEY_IROH_UI_OPK_TARGET:-/mnt/Settings/iroh_funkey-s.opk}
 
 export FUNKEY_IROH_STATE_DIR
 export FUNKEY_IROH_INBOX
+export FUNKEY_IROH_BUNDLE_INBOX
+export FUNKEY_IROH_LIBRARY
 export FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
+export FUNKEY_IROH_MAX_BUNDLE_BYTES=${FUNKEY_IROH_MAX_BUNDLE_BYTES:-17179869184}
+export FUNKEY_IROH_MAX_BUNDLE_FILES=${FUNKEY_IROH_MAX_BUNDLE_FILES:-4096}
+export FUNKEY_IROH_MAX_INCOMING_CONNECTIONS=${FUNKEY_IROH_MAX_INCOMING_CONNECTIONS:-4}
+export FUNKEY_IROH_HANDSHAKE_TIMEOUT=${FUNKEY_IROH_HANDSHAKE_TIMEOUT:-15}
 export FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
 
 install_one_opk()
@@ -65,7 +74,7 @@ acquire_endpoint_lock()
     while ! mkdir "$FUNKEY_IROH_ENDPOINT_LOCK" 2>/dev/null; do
         attempts=$((attempts + 1))
         if [ "$attempts" -ge 30 ]; then
-            echo "funkey-iroh-service: endpoint is busy" >&2
+            echo "funkey-iroh-service: another endpoint command holds $FUNKEY_IROH_ENDPOINT_LOCK" >&2
             return 75
         fi
         sleep 1
@@ -114,9 +123,28 @@ with_endpoint()
     return "$command_status"
 }
 
+print_running_ticket()
+{
+    attempts=0
+    while [ ! -s "$TICKET_FILE" ]; do
+        if ! "$INIT" status >/dev/null 2>&1; then
+            echo "funkey-iroh-service: receiver stopped before publishing a ticket" >&2
+            return 1
+        fi
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 15 ]; then
+            echo "funkey-iroh-service: receiver did not publish a fresh ticket" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    cat "$TICKET_FILE"
+    printf '\n'
+}
+
 enable_service()
 {
-    mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX"
+    mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX" "$FUNKEY_IROH_BUNDLE_INBOX" "$FUNKEY_IROH_LIBRARY"
     : > "$ENABLE_FILE"
 
     if [ ! -e "$UI_INITIALIZED" ]; then
@@ -173,9 +201,8 @@ case "${1:-}" in
         install_ui
         ;;
     ticket)
-        if [ -s "$TICKET_FILE" ]; then
-            cat "$TICKET_FILE"
-            printf '\n'
+        if "$INIT" status >/dev/null 2>&1; then
+            print_running_ticket
         else
             with_endpoint ticket
         fi
@@ -187,9 +214,28 @@ case "${1:-}" in
         shift
         with_endpoint save send "$@"
         ;;
+    bundle)
+        shift
+        case "${1:-}" in
+            send|push)
+                with_endpoint bundle "$@"
+                ;;
+            inspect|verify)
+                exec "$DAEMON" bundle "$@"
+                ;;
+            *)
+                echo "Usage: $0 bundle {send|inspect} ..." >&2
+                exit 64
+                ;;
+        esac
+        ;;
     netplay)
         shift
         with_endpoint netplay "$@"
+        ;;
+    library)
+        shift
+        exec "$LIBRARY_TOOL" "$@"
         ;;
     run)
         shift
@@ -209,7 +255,13 @@ case "${1:-}" in
         ;;
     inbox)
         shift
-        exec /usr/bin/funkey-iroh-inbox "$@"
+        if [ "$#" -gt 0 ]; then
+            exec /usr/bin/funkey-iroh-inbox "$@"
+        fi
+        {
+            /usr/bin/funkey-iroh-inbox list 2>/dev/null
+            find "$FUNKEY_IROH_BUNDLE_INBOX" -type d -name '*.funkey' 2>/dev/null
+        } | sort
         ;;
     session)
         shift
@@ -238,10 +290,14 @@ Commands:
   peer add|list|remove ...       Manage paired endpoint identities
   pairing export|import ...      Exchange USB-friendly pairing cards
   sync list|toggle ...           Configure automatic post-game save peers
-  inbox list|install|archive     Review received saves safely
+  inbox [list|install|archive]   Review received saves and bundles safely
   session list|status|stop       Inspect multiplayer adapters and session
   send PEER SYSTEM GAME FILE     Send a save, pausing the receiver safely
+  bundle send PEER BUNDLE        Send a complete portable game bundle
+  bundle inspect BUNDLE          Verify and list a local portable bundle
+  library COMMAND ...            Adopt, refresh, send, or install games
   netplay host|join ...          Run a UDP tunnel, pausing the receiver safely
+  run ARGS...                    Run another endpoint command safely
   ui [ARGS...]                   Open the on-device Iroh UI
   logs [LINES]                   Show receiver logs
 EOF

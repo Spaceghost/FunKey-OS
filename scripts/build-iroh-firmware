@@ -2,7 +2,22 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
+<<<<<<< HEAD
 version=${FUNKEY_VERSION:-$(make -s -C "$repo" print-version)}
 
 make -C "$repo" -j"${JOBS:-$(nproc)}" zig-all FUNKEY_VERSION="$version"
 "$repo/scripts/build-iroh-variant" "$version"
+=======
+cd "$repo"
+
+make -j"$(nproc)" zig-all
+version=$(make -s print-version)
+./scripts/build-iroh-variant "$version" iroh
+
+if [[ "${FUNKEY_IROH_BUILD_DEBUG_VARIANT:-1}" = 1 ]]; then
+    ./scripts/build-iroh-variant \
+        "$version" \
+        iroh-usb-debug \
+        scripts/usb-gadget-debug
+fi
+>>>>>>> origin/feature/iroh-save-netplay

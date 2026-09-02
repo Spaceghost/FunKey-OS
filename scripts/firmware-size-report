@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Write deterministic firmware footprint reports and enforce hard budgets."""
+
+import argparse
+import json
+import os
+import struct
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+MIB = 1024 * 1024
+EXT_SUPERBLOCK_OFFSET = 1024
+EXT_SUPERBLOCK_SIZE = 1024
+EXT_MAGIC = 0xEF53
+EXT4_FEATURE_INCOMPAT_64BIT = 0x80
+
+
+def display_path(path: Path, base: Path) -> str:
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def read_ext_filesystem(path: Path, base: Path) -> Dict[str, Any]:
+    with path.open("rb") as stream:
+        stream.seek(EXT_SUPERBLOCK_OFFSET)
+        superblock = stream.read(EXT_SUPERBLOCK_SIZE)
+    if len(superblock) != EXT_SUPERBLOCK_SIZE:
+        raise ValueError("short ext superblock: {}".format(path))
+    magic = struct.unpack_from("<H", superblock, 0x38)[0]
+    if magic != EXT_MAGIC:
+        raise ValueError("not an ext filesystem image: {}".format(path))
+
+    blocks = struct.unpack_from("<I", superblock, 0x04)[0]
+    reserved = struct.unpack_from("<I", superblock, 0x08)[0]
+    free = struct.unpack_from("<I", superblock, 0x0C)[0]
+    inodes = struct.unpack_from("<I", superblock, 0x00)[0]
+    free_inodes = struct.unpack_from("<I", superblock, 0x10)[0]
+    log_block_size = struct.unpack_from("<I", superblock, 0x18)[0]
+    incompat = struct.unpack_from("<I", superblock, 0x60)[0]
+    if incompat & EXT4_FEATURE_INCOMPAT_64BIT:
+        blocks |= struct.unpack_from("<I", superblock, 0x150)[0] << 32
+        reserved |= struct.unpack_from("<I", superblock, 0x154)[0] << 32
+        free |= struct.unpack_from("<I", superblock, 0x158)[0] << 32
+
+    block_size = 1024 << log_block_size
+    capacity = blocks * block_size
+    free_bytes = free * block_size
+    volume = superblock[0x78:0x88].split(b"\0", 1)[0].decode("utf-8", "replace")
+    stat = path.stat()
+    return {
+        "path": display_path(path, base),
+        "volume_name": volume,
+        "block_size": block_size,
+        "blocks": blocks,
+        "reserved_blocks": reserved,
+        "capacity_bytes": capacity,
+        "used_bytes": capacity - free_bytes,
+        "free_bytes": free_bytes,
+        "used_percent": round(100.0 * (capacity - free_bytes) / capacity, 3) if capacity else 0.0,
+        "inodes": inodes,
+        "free_inodes": free_inodes,
+        "image_bytes": stat.st_size,
+        "host_allocated_bytes": getattr(stat, "st_blocks", 0) * 512,
+    }
+
+
+def artifact(path: Path, base: Path, required: bool = True) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        if required:
+            raise FileNotFoundError(str(path))
+        return None
+    stat = path.stat()
+    return {
+        "path": display_path(path, base),
+        "bytes": stat.st_size,
+        "host_allocated_bytes": getattr(stat, "st_blocks", 0) * 512,
+    }
+
+
+def scan_tree(root: Path, base: Path, largest_limit: int = 30) -> Dict[str, Any]:
+    seen_regular: Set[Tuple[int, int]] = set()
+    logical_total = 0
+    allocated_total = 0
+    unique_files = 0
+    symlinks = 0
+    duplicate_hardlink_paths = 0
+    top_level: Dict[str, Dict[str, int]] = {}
+    largest: List[Dict[str, Any]] = []
+
+    if not root.is_dir():
+        raise NotADirectoryError(str(root))
+
+    for current, directories, files in os.walk(str(root), followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in files:
+            path = Path(current) / name
+            stat = path.lstat()
+            relative = path.relative_to(root).as_posix()
+            section = "/" + relative.split("/", 1)[0]
+            section_totals = top_level.setdefault(section, {"logical_bytes": 0, "allocated_bytes": 0, "files": 0})
+
+            if path.is_symlink():
+                logical = stat.st_size
+                allocated = getattr(stat, "st_blocks", 0) * 512
+                symlinks += 1
+            elif path.is_file():
+                identity = (stat.st_dev, stat.st_ino)
+                if stat.st_nlink > 1 and identity in seen_regular:
+                    duplicate_hardlink_paths += 1
+                    continue
+                seen_regular.add(identity)
+                logical = stat.st_size
+                allocated = getattr(stat, "st_blocks", 0) * 512
+                largest.append({"path": "/" + relative, "bytes": logical, "allocated_bytes": allocated})
+            else:
+                continue
+
+            logical_total += logical
+            allocated_total += allocated
+            unique_files += 1
+            section_totals["logical_bytes"] += logical
+            section_totals["allocated_bytes"] += allocated
+            section_totals["files"] += 1
+
+    largest.sort(key=lambda row: (-row["bytes"], row["path"]))
+    ordered_sections = [
+        {"path": name, **values}
+        for name, values in sorted(top_level.items(), key=lambda item: (-item[1]["logical_bytes"], item[0]))
+    ]
+    return {
+        "path": display_path(root, base),
+        "logical_bytes": logical_total,
+        "allocated_bytes": allocated_total,
+        "unique_files": unique_files,
+        "symlinks": symlinks,
+        "duplicate_hardlink_paths": duplicate_hardlink_paths,
+        "top_level": ordered_sections,
+        "largest_files": largest[:largest_limit],
+    }
+
+
+def format_bytes(value: int) -> str:
+    return "{:.2f} MiB".format(value / MIB)
+
+
+def evaluate_budgets(report: Dict[str, Any], budget: Dict[str, Any]) -> Dict[str, List[str]]:
+    warnings: List[str] = []
+    violations: List[str] = []
+
+    for name, thresholds in budget.get("artifact_bytes", {}).items():
+        item = report["artifacts"].get(name)
+        if not item:
+            continue
+        actual = item["bytes"]
+        maximum = thresholds.get("max")
+        warning = thresholds.get("warn")
+        if maximum is not None and actual > maximum:
+            violations.append("{} is {} (max {})".format(name, format_bytes(actual), format_bytes(maximum)))
+        elif warning is not None and actual > warning:
+            warnings.append("{} is {} (warn {})".format(name, format_bytes(actual), format_bytes(warning)))
+
+    for name, thresholds in budget.get("filesystem_used_bytes", {}).items():
+        actual = report["filesystems"][name]["used_bytes"]
+        maximum = thresholds.get("max")
+        warning = thresholds.get("warn")
+        if maximum is not None and actual > maximum:
+            violations.append("{} used is {} (max {})".format(name, format_bytes(actual), format_bytes(maximum)))
+        elif warning is not None and actual > warning:
+            warnings.append("{} used is {} (warn {})".format(name, format_bytes(actual), format_bytes(warning)))
+
+    for name, thresholds in budget.get("filesystem_free_bytes", {}).items():
+        actual = report["filesystems"][name]["free_bytes"]
+        minimum = thresholds.get("min")
+        if minimum is not None and actual < minimum:
+            violations.append("{} free is {} (min {})".format(name, format_bytes(actual), format_bytes(minimum)))
+
+    return {"warnings": warnings, "violations": violations}
+
+
+def render_text(report: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    lines.append("FunKey-OS firmware footprint: {}".format(report["version"]))
+    lines.append("")
+    lines.append("Artifacts")
+    for name, item in report["artifacts"].items():
+        if item:
+            lines.append("  {:24s} {:>12s}  {}".format(name, format_bytes(item["bytes"]), item["path"]))
+    lines.append("")
+    lines.append("Filesystems (routine-update images)")
+    for name, item in report["filesystems"].items():
+        lines.append(
+            "  {:8s} used {:>10s} / {:>10s} ({:6.2f}%), free {:>10s}".format(
+                name,
+                format_bytes(item["used_bytes"]),
+                format_bytes(item["capacity_bytes"]),
+                item["used_percent"],
+                format_bytes(item["free_bytes"]),
+            )
+        )
+    lines.append("")
+    seed = report["content_seed"]
+    lines.append("Full-image bootstrap pack")
+    lines.append("  {:>12s}  {}".format(format_bytes(seed["bytes"]), seed["path"]))
+
+    for target_name, target in report["targets"].items():
+        lines.append("")
+        lines.append("{} target: largest unique files".format(target_name))
+        for row in target["largest_files"][:15]:
+            lines.append("  {:>12s}  {}".format(format_bytes(row["bytes"]), row["path"]))
+
+    lines.append("")
+    lines.append("Budget")
+    status = report["budget"]
+    if not status["warnings"] and not status["violations"]:
+        lines.append("  PASS")
+    for message in status["warnings"]:
+        lines.append("  WARN: " + message)
+    for message in status["violations"]:
+        lines.append("  FAIL: " + message)
+    return "\n".join(lines) + "\n"
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(content)
+    os.replace(str(temporary), str(path))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("version")
+    parser.add_argument("--repo-root", type=Path)
+    parser.add_argument("--budget", type=Path)
+    parser.add_argument("--json-output", type=Path)
+    parser.add_argument("--text-output", type=Path)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    repo = (args.repo_root or Path(__file__).resolve().parent.parent).resolve()
+    budget_path = (args.budget or repo / "scripts" / "firmware-size-budget.json").resolve()
+    json_output = args.json_output or repo / "images" / "packages-Firmware-size-{}.json".format(args.version)
+    text_output = args.text_output or repo / "images" / "packages-Firmware-size-{}.txt".format(args.version)
+
+    budget = json.loads(budget_path.read_text(encoding="utf-8"))
+    artifacts = {
+        "firmware_update": artifact(repo / "images" / "FunKey-rootfs-{}.fwu".format(args.version), repo),
+        "sd_image_xz": artifact(repo / "images" / "FunKey-sdcard-{}.img.xz".format(args.version), repo),
+        "sd_image_raw": artifact(repo / "images" / "FunKey-sdcard-{}.img".format(args.version), repo, required=False),
+    }
+    report: Dict[str, Any] = {
+        "schema": 1,
+        "version": args.version,
+        "artifacts": artifacts,
+        "filesystems": {
+            "FunKey": read_ext_filesystem(repo / "FunKey" / "output" / "images" / "rootfs.ext2", repo),
+            "Recovery": read_ext_filesystem(repo / "Recovery" / "output" / "images" / "rootfs.ext2", repo),
+        },
+        "targets": {
+            "FunKey": scan_tree(repo / "FunKey" / "output" / "target", repo),
+            "Recovery": scan_tree(repo / "Recovery" / "output" / "target", repo),
+        },
+        "content_seed": artifact(repo / "content" / "bootstrap" / "funkey_files.zip", repo),
+        "budget_limits": budget,
+    }
+    report["budget"] = evaluate_budgets(report, budget)
+    text = render_text(report)
+    atomic_write(Path(json_output), json.dumps(report, indent=2, sort_keys=True) + "\n")
+    atomic_write(Path(text_output), text)
+    sys.stdout.write(text)
+    return 1 if report["budget"]["violations"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+exec "$repo/scripts/build-usb-variant" \
+    "${1:?usage: build-usb-debug-variant VERSION}" \
+    usb-debug scripts/usb-gadget-debug

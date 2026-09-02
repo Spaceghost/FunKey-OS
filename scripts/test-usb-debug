@@ -1,0 +1,197 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+fail() {
+    printf 'test-usb-debug: %s\n' "$*" >&2
+    exit 1
+}
+
+profile="$repo/scripts/usb-gadget-debug"
+grep -qx 'USB_NETWORK=always' "$profile" || fail "debug profile must force USB networking"
+grep -qx 'USB_MASS_STORAGE=1' "$profile" || fail "debug profile must retain mass storage"
+grep -qx 'USB_DEBUG=1' "$profile" || fail "debug profile must enable persistent debugging"
+
+for default_profile in \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/default/usb-gadget" \
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/default/usb-gadget"
+do
+    grep -qx 'USB_DEBUG=0' "$default_profile" ||
+        fail "production profile unexpectedly enables USB debugging: $default_profile"
+done
+
+cmp "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear" \
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S42dropbear" ||
+    fail "Dropbear init scripts differ beyond their boot-order filename"
+
+identical_overlay_files=(
+    usr/local/lib/usb_debug
+    usr/local/lib/firmware_update
+    usr/local/sbin/usb_debug_monitor
+    usr/local/sbin/usb_network_monitor
+    usr/local/sbin/funkey-debug
+    etc/init.d/S05usb-debug
+    etc/init.d/S10share
+    etc/init.d/S41dhcpcd
+)
+for relative in "${identical_overlay_files[@]}"; do
+    cmp "$repo/FunKey/board/funkey/rootfs-overlay/$relative" \
+        "$repo/Recovery/board/funkey/rootfs-overlay/$relative" ||
+        fail "overlay copies differ: $relative"
+done
+
+posix_scripts=(
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_debug"
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/firmware_update"
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/usb_debug_monitor"
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/usb_network_monitor"
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/funkey-debug"
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/utils"
+    "$repo/Recovery/board/funkey/rootfs-overlay/usr/local/lib/utils"
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/funkey-flash"
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/recovery_mode"
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S05usb-debug"
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S10share"
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S41dhcpcd"
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S05usb-debug"
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S10share"
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S41dhcpcd"
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S42dropbear"
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S60recovery"
+    "$repo/Recovery/board/funkey/rootfs-overlay/usr/local/sbin/normal_mode"
+    "$repo/FunKey/board/funkey/update_partition"
+)
+for script in "${posix_scripts[@]}"; do
+    sh -n "$script" || fail "POSIX shell syntax failed: $script"
+done
+
+bash_scripts=(
+    "$repo/scripts/build-usb-variant"
+    "$repo/scripts/build-usb-network-variant"
+    "$repo/scripts/build-usb-debug-variant"
+    "$repo/scripts/build-usb-variants"
+    "$repo/scripts/funkey-usb-debug"
+    "$repo/scripts/test-usb-debug"
+)
+for script in "${bash_scripts[@]}"; do
+    bash -n "$script" || fail "Bash syntax failed: $script"
+done
+
+mkdir -p "$tmp/mnt" "$tmp/run" "$tmp/log"
+cat > "$tmp/profile" <<'EOF'
+USB_NETWORK=always
+USB_MASS_STORAGE=1
+USB_DEBUG=1
+USB_DEBUG_HOLD_AFTER_FLASH=0
+EOF
+printf '/dev/mmcblk0p4 %s vfat rw 0 0\n' "$tmp/mnt" > "$tmp/mounts"
+printf 'test-boot-id\n' > "$tmp/boot-id"
+printf 'FunKey\ttest-version\n' > "$tmp/versions"
+
+export USB_DEBUG_CONFIG="$tmp/profile"
+export USB_DEBUG_ROOT="$tmp/mnt/FunKey/Debug"
+export USB_DEBUG_MOUNT_POINT="$tmp/mnt"
+export USB_DEBUG_MOUNTS_FILE="$tmp/mounts"
+export USB_DEBUG_VOLATILE_LOG="$tmp/log/usb-debug.log"
+export USB_DEBUG_SESSION_FILE="$tmp/run/session"
+export USB_DEBUG_UPDATE_STATE_FILE="$tmp/run/update-state"
+export USB_DEBUG_HOLD_FILE="$USB_DEBUG_ROOT/hold-after-flash"
+export USB_DEBUG_MODE_FILE="$tmp/versions"
+export USB_DEBUG_BOOT_ID_FILE="$tmp/boot-id"
+export USB_DEBUG_LOG_TO_KMSG=0
+# shellcheck source=/dev/null
+. "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_debug"
+
+usb_debug_log test "persistent hello"
+persistent_log="$USB_DEBUG_ROOT/sessions/test-boot-id.log"
+[[ -f "$persistent_log" ]] || fail "persistent session log was not created"
+grep -q 'component=test persistent hello' "$persistent_log" ||
+    fail "persistent session log is missing the event"
+
+usb_debug_set_update_state unit-testing
+[[ "$(usb_debug_update_state)" == unit-testing ]] ||
+    fail "volatile update state was not retained"
+[[ "$(cat "$USB_DEBUG_ROOT/update-state")" == unit-testing ]] ||
+    fail "durable update state was not retained"
+
+usb_debug_should_hold_after_flash &&
+    fail "hold should be disabled before its marker exists"
+mkdir -p "$USB_DEBUG_ROOT"
+: > "$USB_DEBUG_HOLD_FILE"
+usb_debug_should_hold_after_flash ||
+    fail "hold marker was ignored"
+rm -f "$USB_DEBUG_HOLD_FILE"
+
+debug_success() {
+    printf 'success-output\n'
+    return 0
+}
+debug_failure() {
+    printf 'failure-output\n'
+    return 23
+}
+
+usb_debug_run unit-success debug_success > "$tmp/success.out"
+grep -q success-output "$tmp/success.out" ||
+    fail "usb_debug_run did not stream successful output"
+
+set +e
+usb_debug_run unit-failure debug_failure > "$tmp/failure.out"
+failure_status=$?
+set -e
+[[ "$failure_status" -eq 23 ]] ||
+    fail "usb_debug_run lost failing status: $failure_status"
+grep -q failure-output "$tmp/failure.out" ||
+    fail "usb_debug_run did not stream failing output"
+
+cat > "$tmp/mock-sfdisk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MODE_TEST_LOG"
+exit "${MODE_TEST_SFDISK_STATUS:-0}"
+EOF
+cat > "$tmp/mock-reboot" <<'EOF'
+#!/bin/sh
+printf '%s\n' reboot >> "$MODE_TEST_LOG"
+EOF
+chmod +x "$tmp/mock-sfdisk" "$tmp/mock-reboot"
+
+export MODE_TEST_LOG="$tmp/mode.log"
+export MODE_TEST_SFDISK_STATUS=0
+export SFDISK_COMMAND="$tmp/mock-sfdisk"
+export REBOOT_COMMAND="$tmp/mock-reboot"
+cat > "$tmp/disabled-profile" <<'EOF'
+USB_DEBUG=0
+EOF
+export USB_DEBUG_CONFIG="$tmp/disabled-profile"
+
+: > "$MODE_TEST_LOG"
+"$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/recovery_mode"
+grep -qx -- '-A /dev/mmcblk0 1' "$MODE_TEST_LOG" ||
+    fail "recovery_mode did not select partition 1"
+grep -qx reboot "$MODE_TEST_LOG" ||
+    fail "recovery_mode did not reboot after a successful selection"
+
+: > "$MODE_TEST_LOG"
+"$repo/Recovery/board/funkey/rootfs-overlay/usr/local/sbin/normal_mode"
+grep -qx -- '-A /dev/mmcblk0 2' "$MODE_TEST_LOG" ||
+    fail "normal_mode did not select partition 2"
+grep -qx reboot "$MODE_TEST_LOG" ||
+    fail "normal_mode did not reboot after a successful selection"
+
+: > "$MODE_TEST_LOG"
+export MODE_TEST_SFDISK_STATUS=19
+set +e
+"$repo/Recovery/board/funkey/rootfs-overlay/usr/local/sbin/normal_mode" >/dev/null 2>&1
+mode_failure_status=$?
+set -e
+[[ "$mode_failure_status" -eq 19 ]] ||
+    fail "normal_mode did not preserve sfdisk failure: $mode_failure_status"
+if grep -qx reboot "$MODE_TEST_LOG"; then
+    fail "normal_mode rebooted after sfdisk failed"
+fi
+
+printf 'test-usb-debug: PASS\n'

@@ -1,0 +1,737 @@
+#!/bin/sh
+set -u
+
+CONFIG=/etc/default/funkey-iroh
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+LIBRARY=${FUNKEY_IROH_LIBRARY:-/mnt/FunKey/Shared Games}
+BUNDLE_INBOX=${FUNKEY_IROH_BUNDLE_INBOX:-$STATE_DIR/bundle-inbox}
+HOME=${FUNKEY_HOME:-/mnt/FunKey}
+export HOME
+REGISTRY=$STATE_DIR/library.tsv
+LAST_GAME=$STATE_DIR/last-game.tsv
+DEFAULT_PEER=$STATE_DIR/default-peer
+AUTOSYNC=$STATE_DIR/autosync
+BIOS_LIST=$STATE_DIR/include-system.txt
+SERVICE=${FUNKEY_IROH_SERVICE:-/usr/bin/funkey-iroh-service}
+DAEMON=${FUNKEY_IROH_BIN:-/usr/bin/funkey-iroh}
+
+die()
+{
+    code=$1
+    shift
+    echo "funkey-iroh-library: $*" >&2
+    exit "$code"
+}
+
+sanitize()
+{
+    printf '%s' "$1" |
+        tr '\t\r\n /\\:' '________' |
+        sed 's/[^A-Za-z0-9._-]/-/g; s/[-_][-_]*/_/g; s/^[._-]*//; s/[._-]*$//' |
+        cut -c1-96
+}
+
+core_name()
+{
+    name=$(basename "$1")
+    name=${name%_libretro.so}
+    name=${name%.so}
+    sanitize "$name"
+}
+
+absolute_path()
+{
+    target=$1
+    case "$target" in
+        /*) ;;
+        *) target="$(pwd)/$target" ;;
+    esac
+    directory=$(dirname "$target")
+    filename=$(basename "$target")
+    (
+        cd "$directory" 2>/dev/null || exit 1
+        printf '%s/%s\n' "$(pwd -P)" "$filename"
+    )
+}
+
+manifest_get()
+{
+    key=$1
+    manifest=$2
+    awk -F '\t' -v wanted="$key" '
+        $1 == wanted {
+            sub(/^[^\t]*\t/, "")
+            print
+            exit
+        }
+    ' "$manifest"
+}
+
+json_escape()
+{
+    printf '%s' "$1" |
+        tr '\r\n\t' '   ' |
+        sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+write_json_manifest()
+{
+    bundle=$1
+    manifest=$bundle/manifest.tsv
+    output=$bundle/manifest.json
+    schema=$(manifest_get schema "$manifest")
+    system=$(manifest_get system "$manifest")
+    game=$(manifest_get game "$manifest")
+    core=$(manifest_get core "$manifest")
+    core_path=$(manifest_get core_path "$manifest")
+    core_sha=$(manifest_get core_sha256 "$manifest")
+    content_rel=$(manifest_get content "$manifest")
+    created=$(manifest_get created_unix "$manifest")
+    updated=$(manifest_get updated_unix "$manifest")
+
+    temporary=$output.tmp.$$
+    {
+        printf '{\n'
+        printf '  "schema": %s,\n' "${schema:-1}"
+        printf '  "kind": "funkey-play-bundle",\n'
+        printf '  "system": "%s",\n' "$(json_escape "$system")"
+        printf '  "game": "%s",\n' "$(json_escape "$game")"
+        printf '  "content": "%s",\n' "$(json_escape "$content_rel")"
+        printf '  "picoarch_core": "%s",\n' "$(json_escape "$core")"
+        printf '  "core_path": "%s",\n' "$(json_escape "$core_path")"
+        printf '  "core_sha256": "%s",\n' "$(json_escape "$core_sha")"
+        printf '  "created_unix": %s,\n' "${created:-0}"
+        printf '  "updated_unix": %s,\n' "${updated:-0}"
+        printf '  "retroarch": {\n'
+        printf '    "content_dir": "content",\n'
+        printf '    "save_dir": "retroarch/saves",\n'
+        printf '    "state_dir": "retroarch/states",\n'
+        printf '    "config_dir": "retroarch/config",\n'
+        printf '    "system_dir": "retroarch/system"\n'
+        printf '  },\n'
+        printf '  "savestate_compatibility": "requires the same core family and a compatible core version"\n'
+        printf '}\n'
+    } > "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    mv "$temporary" "$output"
+}
+
+replace_manifest_value()
+{
+    manifest=$1
+    key=$2
+    value=$3
+    temporary=$manifest.tmp.$$
+    awk -F '\t' -v wanted="$key" -v replacement="$value" '
+        BEGIN { found = 0 }
+        $1 == wanted {
+            print wanted "\t" replacement
+            found = 1
+            next
+        }
+        { print }
+        END {
+            if (!found)
+                print wanted "\t" replacement
+        }
+    ' "$manifest" > "$temporary" &&
+        mv "$temporary" "$manifest"
+}
+
+register_bundle()
+{
+    content=$1
+    bundle=$2
+    mkdir -p "$STATE_DIR"
+    temporary=$REGISTRY.tmp.$$
+    if [ -r "$REGISTRY" ]; then
+        awk -F '\t' -v content="$content" '$1 != content { print }' "$REGISTRY" > "$temporary"
+    else
+        : > "$temporary"
+    fi
+    printf '%s\t%s\n' "$content" "$bundle" >> "$temporary"
+    mv "$temporary" "$REGISTRY"
+}
+
+registered_bundle()
+{
+    content=$1
+    [ -r "$REGISTRY" ] || return 1
+    awk -F '\t' -v wanted="$content" '$1 == wanted { print $2; exit }' "$REGISTRY"
+}
+
+copy_regular()
+{
+    source=$1
+    destination=$2
+    [ -f "$source" ] || return 0
+    [ ! -L "$source" ] || die 3 "refusing symlink $source"
+    mkdir -p "$(dirname "$destination")"
+    temporary=$destination.tmp.$$
+    cp "$source" "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    mv "$temporary" "$destination"
+}
+
+copy_content_reference()
+{
+    source_dir=$1
+    destination_dir=$2
+    reference=$3
+
+    reference=$(printf '%s' "$reference" | tr '\\' '/' | sed 's/\r$//')
+    case "$reference" in
+        ''|'#'*) return 0 ;;
+        /*|../*|*/../*|*/..|..)
+            echo "funkey-iroh-library: ignored unsafe content reference $reference" >&2
+            return 0
+            ;;
+    esac
+
+    source=$source_dir/$reference
+    [ -f "$source" ] || {
+        echo "funkey-iroh-library: referenced content is missing: $source" >&2
+        return 0
+    }
+    copy_regular "$source" "$destination_dir/$reference"
+}
+
+copy_content_set()
+{
+    content=$1
+    destination=$2
+    source_dir=$(dirname "$content")
+    filename=$(basename "$content")
+    stem=${filename%.*}
+    extension=${filename##*.}
+
+    copy_regular "$content" "$destination/$filename"
+
+    for sidecar_extension in ips bps ups xdelta sbi; do
+        copy_regular "$source_dir/$stem.$sidecar_extension" \
+            "$destination/$stem.$sidecar_extension"
+        copy_regular "$source_dir/$stem.${sidecar_extension}.zip" \
+            "$destination/$stem.${sidecar_extension}.zip"
+    done
+
+    case "$(printf '%s' "$extension" | tr 'A-Z' 'a-z')" in
+        cue)
+            sed -n 's/^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]*"\([^"]*\)".*/\1/p' "$content" |
+                while IFS= read -r reference; do
+                    copy_content_reference "$source_dir" "$destination" "$reference"
+                done
+            ;;
+        m3u)
+            while IFS= read -r reference; do
+                copy_content_reference "$source_dir" "$destination" "$reference"
+            done < "$content"
+            ;;
+        ccd)
+            copy_regular "$source_dir/$stem.img" "$destination/$stem.img"
+            copy_regular "$source_dir/$stem.sub" "$destination/$stem.sub"
+            ;;
+        gdi)
+            sed '1d; s/^[^ ]*[[:space:]]\+[^ ]*[[:space:]]\+[^ ]*[[:space:]]\+//; s/^[[:space:]]*//; s/[[:space:]].*$//; s/^"//; s/"$//' "$content" |
+                while IFS= read -r reference; do
+                    copy_content_reference "$source_dir" "$destination" "$reference"
+                done
+            ;;
+    esac
+}
+
+copy_progress_from()
+{
+    source_dir=$1
+    stem=$2
+    core=$3
+    bundle=$4
+    [ -d "$source_dir" ] || return 0
+
+    for source in \
+        "$source_dir/$stem.sav" \
+        "$source_dir/$stem.srm" \
+        "$source_dir/$stem.rtc" \
+        "$source_dir/$stem.cfg" \
+        "$source_dir/$stem".st[0-9]* \
+        "$source_dir/picoarch.cfg" \
+        "$source_dir/picoarch-auto.cfg"
+    do
+        [ -f "$source" ] || continue
+        basename=$(basename "$source")
+        copy_regular "$source" "$bundle/picoarch/$basename"
+
+        case "$basename" in
+            "$stem.srm")
+                copy_regular "$source" "$bundle/retroarch/saves/$stem.srm"
+                ;;
+            "$stem.sav")
+                if [ ! -f "$bundle/retroarch/saves/$stem.srm" ]; then
+                    copy_regular "$source" "$bundle/retroarch/saves/$stem.srm"
+                fi
+                copy_regular "$source" "$bundle/retroarch/saves/$stem.sav"
+                ;;
+            "$stem.rtc")
+                copy_regular "$source" "$bundle/retroarch/saves/$stem.rtc"
+                ;;
+            "$stem.cfg"|picoarch.cfg|picoarch-auto.cfg)
+                copy_regular "$source" "$bundle/retroarch/config/$core/$basename"
+                ;;
+            "$stem".st[0-9]*.bmp)
+                slot=${basename#"$stem".st}
+                slot=${slot%.bmp}
+                copy_regular "$source" "$bundle/retroarch/states/$stem.state$slot.bmp"
+                ;;
+            "$stem".st[0-9]*)
+                slot=${basename#"$stem".st}
+                copy_regular "$source" "$bundle/retroarch/states/$stem.state$slot"
+                ;;
+        esac
+    done
+}
+
+copy_explicit_system_files()
+{
+    bundle=$1
+    [ -r "$BIOS_LIST" ] || return 0
+    while IFS= read -r source; do
+        case "$source" in
+            ''|'#'*) continue ;;
+        esac
+        [ -f "$source" ] || {
+            echo "funkey-iroh-library: configured system file is missing: $source" >&2
+            continue
+        }
+        copy_regular "$source" "$bundle/retroarch/system/$(basename "$source")"
+    done < "$BIOS_LIST"
+}
+
+infer_system()
+{
+    core=$1
+    content=$2
+    extension=${content##*.}
+    extension=$(printf '%s' "$extension" | tr 'A-Z' 'a-z')
+    case "$extension" in
+        gb|dmg) printf '%s\n' gb ;;
+        gbc) printf '%s\n' gbc ;;
+        gba) printf '%s\n' gba ;;
+        nes|fds) printf '%s\n' nes ;;
+        smc|sfc) printf '%s\n' snes ;;
+        md|gen|smd) printf '%s\n' megadrive ;;
+        gg) printf '%s\n' gamegear ;;
+        sms) printf '%s\n' mastersystem ;;
+        pce) printf '%s\n' pce ;;
+        ws|wsc) printf '%s\n' wonderswan ;;
+        ngp|ngc) printf '%s\n' ngp ;;
+        *)
+            case "$core" in
+                gambatte*) printf '%s\n' gbc ;;
+                gpsp*) printf '%s\n' gba ;;
+                fceumm*) printf '%s\n' nes ;;
+                snes*) printf '%s\n' snes ;;
+                *) sanitize "$core" ;;
+            esac
+            ;;
+    esac
+}
+
+system_directory()
+{
+    case "$1" in
+        gb) printf '%s\n' "/mnt/Game Boy" ;;
+        gbc) printf '%s\n' "/mnt/Game Boy Color" ;;
+        gba) printf '%s\n' "/mnt/Game Boy Advance" ;;
+        nes) printf '%s\n' "/mnt/NES" ;;
+        snes) printf '%s\n' "/mnt/SNES" ;;
+        megadrive) printf '%s\n' "/mnt/Sega Genesis" ;;
+        mastersystem) printf '%s\n' "/mnt/Sega Master System" ;;
+        gamegear) printf '%s\n' "/mnt/Game Gear" ;;
+        pce) printf '%s\n' "/mnt/PCE-TurboGrafx" ;;
+        wonderswan) printf '%s\n' "/mnt/WonderSwan" ;;
+        ngp) printf '%s\n' "/mnt/Neo Geo Pocket" ;;
+        ps1) printf '%s\n' "/mnt/PS1" ;;
+        *) printf '%s/%s\n' "$LIBRARY/Installed Content" "$(sanitize "$1")" ;;
+    esac
+}
+
+adopt()
+{
+    [ "$#" -eq 3 ] || die 64 "Usage: $0 adopt SYSTEM CORE CONTENT"
+    system=$(sanitize "$1")
+    [ -n "$system" ] || die 2 "invalid system identifier"
+    core=$(core_name "$2")
+    [ -n "$core" ] || die 2 "invalid core identifier"
+    content=$(absolute_path "$3") || die 2 "cannot resolve content path $3"
+    [ -f "$content" ] || die 2 "content is not a regular file: $content"
+    [ ! -L "$content" ] || die 2 "content may not be a symlink"
+
+    filename=$(basename "$content")
+    stem=${filename%.*}
+    game=$(sanitize "$stem")
+    [ -n "$game" ] || game=game
+    bundle=$LIBRARY/$system/$game.funkey
+
+    if [ -r "$bundle/manifest.tsv" ]; then
+        existing=$(manifest_get source_content "$bundle/manifest.tsv")
+        if [ "$existing" != "$content" ]; then
+            short_hash=$(sha256sum "$content" | awk '{print substr($1,1,12)}')
+            bundle=$LIBRARY/$system/$game-$short_hash.funkey
+        fi
+    fi
+
+    mkdir -p \
+        "$bundle/content" \
+        "$bundle/picoarch" \
+        "$bundle/retroarch/saves" \
+        "$bundle/retroarch/states" \
+        "$bundle/retroarch/config/$core" \
+        "$bundle/retroarch/remaps/$core" \
+        "$bundle/retroarch/system" \
+        "$bundle/cores/linux-armv7-musleabihf" ||
+        die 3 "cannot create bundle $bundle"
+
+    copy_content_set "$content" "$bundle/content" ||
+        die 3 "cannot copy content set"
+
+    cat > "$bundle/retroarch/README.txt" <<EOF
+FUNKEY PORTABLE GAME BUNDLE
+
+CONTENT: content/$filename
+SAVES:   retroarch/saves
+STATES:  retroarch/states
+CONFIG:  retroarch/config
+REMAPS:  retroarch/remaps
+SYSTEM:  retroarch/system
+
+Point a compatible RetroArch installation at these directories or let a
+FunKey-aware client import manifest.json. Savestates require a compatible core.
+EOF
+
+    core_path=$2
+    case "$core_path" in
+        /*) ;;
+        *) core_path=/usr/games/${core}_libretro.so ;;
+    esac
+    if [ -f "$core_path" ]; then
+        core_sha=$(sha256sum "$core_path" | awk '{print $1}')
+        if [ "${FUNKEY_IROH_INCLUDE_CORE:-0}" = 1 ]; then
+            copy_regular "$core_path" \
+                "$bundle/cores/linux-armv7-musleabihf/$(basename "$core_path")"
+        fi
+    else
+        core_sha=unavailable
+    fi
+
+    now=$(date +%s 2>/dev/null || printf 0)
+    manifest=$bundle/manifest.tsv
+    {
+        printf 'schema\t1\n'
+        printf 'kind\tfunkey-play-bundle\n'
+        printf 'system\t%s\n' "$system"
+        printf 'game\t%s\n' "$game"
+        printf 'content\tcontent/%s\n' "$filename"
+        printf 'source_content\t%s\n' "$content"
+        printf 'core\t%s\n' "$core"
+        printf 'core_path\t%s\n' "$core_path"
+        printf 'core_sha256\t%s\n' "$core_sha"
+        printf 'created_unix\t%s\n' "$now"
+        printf 'updated_unix\t%s\n' "$now"
+    } > "$manifest" || die 3 "cannot write $manifest"
+
+    register_bundle "$content" "$bundle"
+    refresh "$bundle"
+    printf '%s\n' "$bundle"
+}
+
+refresh()
+{
+    [ "$#" -eq 1 ] || die 64 "Usage: $0 refresh BUNDLE.funkey"
+    bundle=$1
+    manifest=$bundle/manifest.tsv
+    [ -r "$manifest" ] || die 2 "missing bundle manifest: $manifest"
+
+    core=$(manifest_get core "$manifest")
+    content_rel=$(manifest_get content "$manifest")
+    source_content=$(manifest_get source_content "$manifest")
+    filename=$(basename "$content_rel")
+    stem=${filename%.*}
+
+    mkdir -p \
+        "$bundle/picoarch" \
+        "$bundle/retroarch/saves" \
+        "$bundle/retroarch/states" \
+        "$bundle/retroarch/config/$core" \
+        "$bundle/retroarch/remaps/$core" \
+        "$bundle/retroarch/system"
+
+    copy_progress_from "$HOME/.picoarch/data/$core" "$stem" "$core" "$bundle"
+    copy_progress_from "$HOME/.picoarch-$core" "$stem" "$core" "$bundle"
+    copy_explicit_system_files "$bundle"
+
+    now=$(date +%s 2>/dev/null || printf 0)
+    replace_manifest_value "$manifest" updated_unix "$now" ||
+        die 3 "cannot update manifest timestamp"
+    write_json_manifest "$bundle" ||
+        die 3 "cannot write JSON manifest"
+
+    if [ -n "$source_content" ]; then
+        register_bundle "$source_content" "$bundle"
+    fi
+    "$DAEMON" bundle inspect "$bundle" > "$bundle/files.tsv.tmp" &&
+        mv "$bundle/files.tsv.tmp" "$bundle/files.tsv"
+    sync
+}
+
+after_game()
+{
+    [ "$#" -ge 2 ] || die 64 "Usage: $0 after-game CORE CONTENT"
+    core=$(core_name "$1")
+    content=$(absolute_path "$2") || exit 0
+    mkdir -p "$STATE_DIR"
+    now=$(date +%s 2>/dev/null || printf 0)
+    {
+        printf 'core\t%s\n' "$core"
+        printf 'content\t%s\n' "$content"
+        printf 'updated_unix\t%s\n' "$now"
+    } > "$LAST_GAME.tmp.$$" &&
+        mv "$LAST_GAME.tmp.$$" "$LAST_GAME"
+
+    bundle=$(registered_bundle "$content" 2>/dev/null || true)
+    [ -n "$bundle" ] || return 0
+    refresh "$bundle" || return $?
+
+    if [ -e "$AUTOSYNC" ] && [ -s "$DEFAULT_PEER" ]; then
+        IFS= read -r peer < "$DEFAULT_PEER"
+        (
+            "$SERVICE" bundle send "$peer" "$bundle"
+        ) >> "$STATE_DIR/autosync.log" 2>&1 &
+    fi
+}
+
+snapshot_last()
+{
+    [ -r "$LAST_GAME" ] || die 2 "no game has exited since Iroh was installed"
+    core=$(manifest_get core "$LAST_GAME")
+    content=$(manifest_get content "$LAST_GAME")
+    [ -f "$content" ] || die 2 "last game content is missing: $content"
+
+    bundle=$(registered_bundle "$content" 2>/dev/null || true)
+    if [ -z "$bundle" ]; then
+        system=$(infer_system "$core" "$content")
+        bundle=$(adopt "$system" "$core" "$content")
+    else
+        refresh "$bundle"
+    fi
+    printf '%s\n' "$bundle"
+}
+
+send_bundle()
+{
+    [ "$#" -ge 1 ] && [ "$#" -le 2 ] ||
+        die 64 "Usage: $0 send BUNDLE.funkey [PEER]"
+    bundle=$1
+    peer=${2:-}
+    if [ -z "$peer" ]; then
+        [ -s "$DEFAULT_PEER" ] || die 2 "no default peer selected"
+        IFS= read -r peer < "$DEFAULT_PEER"
+    fi
+    "$SERVICE" bundle send "$peer" "$bundle"
+}
+
+copy_install_file()
+{
+    source=$1
+    destination=$2
+    mkdir -p "$(dirname "$destination")"
+    if [ ! -e "$destination" ]; then
+        copy_regular "$source" "$destination"
+        return
+    fi
+    if cmp -s "$source" "$destination"; then
+        return
+    fi
+    timestamp=$(date +%s 2>/dev/null || printf 0)
+    conflict=$destination.incoming-$timestamp
+    copy_regular "$source" "$conflict"
+    echo "CONFLICT $destination -> $conflict" >&2
+    return 4
+}
+
+install_tree()
+{
+    source_root=$1
+    destination_root=$2
+    [ -d "$source_root" ] || return 0
+    list=/tmp/funkey-iroh-install.$$
+    find "$source_root" -type f -print > "$list"
+    status=0
+    while IFS= read -r source; do
+        relative=${source#"$source_root/"}
+        copy_install_file "$source" "$destination_root/$relative" || status=$?
+    done < "$list"
+    rm -f "$list"
+    return "$status"
+}
+
+install_bundle()
+{
+    [ "$#" -eq 1 ] || die 64 "Usage: $0 install BUNDLE.funkey"
+    bundle=$1
+    manifest=$bundle/manifest.tsv
+    [ -r "$manifest" ] || die 2 "missing bundle manifest: $manifest"
+
+    system=$(manifest_get system "$manifest")
+    core=$(manifest_get core "$manifest")
+    content_rel=$(manifest_get content "$manifest")
+    filename=$(basename "$content_rel")
+    destination_dir=$(system_directory "$system")
+    mkdir -p "$destination_dir"
+
+    content_status=0
+    install_tree "$bundle/content" "$destination_dir" || content_status=$?
+    [ "$content_status" -eq 0 ] ||
+        die 4 "content conflicts were preserved; resolve them before launching"
+
+    save_dir=$HOME/.picoarch/data/$core
+    mkdir -p "$save_dir" "$HOME/.picoarch/system"
+    install_tree "$bundle/picoarch" "$save_dir" || true
+    install_tree "$bundle/retroarch/system" "$HOME/.picoarch/system" || true
+
+    installed_content=$destination_dir/$filename
+    [ -f "$installed_content" ] ||
+        die 4 "primary content was not installed: $installed_content"
+    register_bundle "$installed_content" "$bundle"
+    printf '%s\n' "$installed_content"
+}
+
+list_bundles()
+{
+    find "$LIBRARY" -type d -name '*.funkey' 2>/dev/null | sort
+}
+
+list_inbox()
+{
+    find "$BUNDLE_INBOX" -type d -name '*.funkey' 2>/dev/null | sort
+}
+
+set_default_peer()
+{
+    [ "$#" -eq 1 ] || die 64 "Usage: $0 default-peer NAME"
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$1" > "$DEFAULT_PEER.tmp.$$" &&
+        mv "$DEFAULT_PEER.tmp.$$" "$DEFAULT_PEER"
+}
+
+set_autosync()
+{
+    [ "$#" -eq 1 ] || die 64 "Usage: $0 autosync on|off"
+    mkdir -p "$STATE_DIR"
+    case "$1" in
+        on|enable|1) : > "$AUTOSYNC" ;;
+        off|disable|0) rm -f "$AUTOSYNC" ;;
+        *) die 64 "autosync must be on or off" ;;
+    esac
+}
+
+self_test()
+{
+    temporary=/tmp/funkey-iroh-library-test.$$
+    trap 'rm -rf "$temporary"' EXIT INT TERM
+    mkdir -p "$temporary/source" "$temporary/home"
+    printf 'test-rom\n' > "$temporary/source/Test Game.gbc"
+    HOME=$temporary/home
+    STATE_DIR=$temporary/state
+    LIBRARY=$temporary/library
+    REGISTRY=$STATE_DIR/library.tsv
+    LAST_GAME=$STATE_DIR/last-game.tsv
+    DEFAULT_PEER=$STATE_DIR/default-peer
+    AUTOSYNC=$STATE_DIR/autosync
+    BIOS_LIST=$STATE_DIR/include-system.txt
+    bundle=$(adopt gbc gambatte "$temporary/source/Test Game.gbc")
+    [ -r "$bundle/manifest.json" ] || die 10 "self-test manifest missing"
+    [ -r "$bundle/content/Test Game.gbc" ] || die 10 "self-test content missing"
+    "$DAEMON" bundle inspect "$bundle" >/dev/null ||
+        die 10 "self-test bundle verification failed"
+    echo "funkey-iroh-library self-test: PASS"
+}
+
+usage()
+{
+    cat <<EOF
+Usage: $0 COMMAND [ARGS]
+
+Commands:
+  adopt SYSTEM CORE CONTENT       Create a portable game bundle
+  refresh BUNDLE.funkey           Capture SRAM, RTC, configs, and savestates
+  after-game CORE CONTENT         Record exit and refresh an adopted game
+  snapshot-last                   Adopt/refresh the most recently exited game
+  send BUNDLE.funkey [PEER]       Send a complete portable game bundle
+  install BUNDLE.funkey           Install a received bundle without overwrites
+  list                            List local portable bundles
+  inbox                           List received portable bundles
+  last                            Show the most recently exited game
+  default-peer NAME               Select the automatic/default destination
+  autosync on|off                 Toggle post-game bundle synchronization
+  self-test                       Exercise local bundle creation and validation
+EOF
+}
+
+case "${1:-}" in
+    adopt)
+        shift
+        adopt "$@"
+        ;;
+    refresh)
+        shift
+        refresh "$@"
+        ;;
+    after-game)
+        shift
+        after_game "$@"
+        ;;
+    snapshot-last)
+        snapshot_last
+        ;;
+    send)
+        shift
+        send_bundle "$@"
+        ;;
+    install)
+        shift
+        install_bundle "$@"
+        ;;
+    list)
+        list_bundles
+        ;;
+    inbox)
+        list_inbox
+        ;;
+    last)
+        [ -r "$LAST_GAME" ] && cat "$LAST_GAME" ||
+            die 2 "no last-game record"
+        ;;
+    default-peer)
+        shift
+        set_default_peer "$@"
+        ;;
+    autosync)
+        shift
+        set_autosync "$@"
+        ;;
+    self-test)
+        self_test
+        ;;
+    help|-h|--help|'')
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 64
+        ;;
+esac
