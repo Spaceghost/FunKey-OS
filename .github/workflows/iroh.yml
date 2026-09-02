@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/iroh.yml'
       - '.github/workflows/iroh-hardware-loop.yml'
+      - '.github/workflows/iroh-pr-hardware.yml'
       - '.github/workflows/release.yml'
       - 'docs/iroh.md'
       - 'docs/release-readiness.md'
@@ -21,6 +22,7 @@ on:
     paths:
       - '.github/workflows/iroh.yml'
       - '.github/workflows/iroh-hardware-loop.yml'
+      - '.github/workflows/iroh-pr-hardware.yml'
       - '.github/workflows/release.yml'
       - 'docs/iroh.md'
       - 'docs/release-readiness.md'
