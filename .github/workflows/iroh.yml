@@ -71,14 +71,16 @@ jobs:
           tools/funkey-iroh/target-rootfs/etc/init.d/S44funkey-iroh \
           tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-service
 
-    - name: Build Iroh firmware variant
-      run: ./scripts/build-iroh-firmware
-
-    - name: Run native protocol and state tests
+    - name: Lock and test the native daemon
       run: |
+        cargo generate-lockfile \
+          --manifest-path tools/funkey-iroh/Cargo.toml
         cargo test \
           --manifest-path tools/funkey-iroh/Cargo.toml \
           --locked
+
+    - name: Build Iroh firmware variant
+      run: ./scripts/build-iroh-firmware
 
     - name: Inspect target executable
       run: |
