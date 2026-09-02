@@ -36,8 +36,17 @@ pub fn load_or_create(path: &Path) -> Result<SecretKey> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("restrict temporary identity {}", temporary.display()))?;
+            // The stock FunKey data partition is FAT, where chmod may be rejected or
+            // ignored. Keep atomic identity creation working there, while still applying
+            // 0600 when the configured state directory lives on a Unix filesystem.
+            if let Err(error) =
+                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+            {
+                eprintln!(
+                    "funkey-iroh: could not restrict identity permissions on {}: {error}; physical access to the data partition can expose this key",
+                    temporary.display()
+                );
+            }
         }
 
         if path.exists() {
