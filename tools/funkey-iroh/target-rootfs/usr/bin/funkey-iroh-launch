@@ -9,10 +9,12 @@ COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
 . "$COMMON"
 
 UI=${FUNKEY_IROH_UI:-/usr/bin/funkey-iroh-ui}
+POSTGAME=${FUNKEY_IROH_POSTGAME:-/usr/bin/funkey-iroh-postgame}
 PROMPT_FILE=${FUNKEY_IROH_PROMPT_FILE:-$FUNKEY_IROH_STATE_DIR/launch-prompt}
 ACTION_FILE=${FUNKEY_IROH_ACTION_FILE:-$FUNKEY_IROH_RUNTIME_DIR/launch.action}
 SESSION_FILE=${FUNKEY_IROH_SESSION_FILE:-$FUNKEY_IROH_RUNTIME_DIR/session}
 SESSION_LOG=${FUNKEY_IROH_SESSION_LOG:-$FUNKEY_IROH_STATE_DIR/netplay.log}
+TAB=$(printf '\t')
 
 system=
 while [ "$#" -gt 0 ]; do
@@ -42,7 +44,7 @@ for argument in "$@"; do
     rom=$argument
 done
 case "$rom" in
-    /mnt/*) ;;
+    "$FUNKEY_IROH_DATA_ROOT"/*) ;;
     *) rom= ;;
 esac
 
@@ -73,7 +75,7 @@ fi
 action=solo
 peer=
 if [ -r "$ACTION_FILE" ]; then
-    IFS='	' read -r action peer < "$ACTION_FILE" || action=solo
+    IFS=$TAB read -r action peer < "$ACTION_FILE" || action=solo
 fi
 rm -f "$ACTION_FILE"
 
@@ -91,9 +93,10 @@ trap 'stop_netplay' INT TERM HUP
 start_netplay()
 {
     adapter_line=$("$FUNKEY_IROH_SESSION" adapter "$system") || return 1
-    IFS='	' read -r adapter_system bind_address target_address adapter_label <<EOF
+    IFS=$TAB read -r adapter_system bind_address target_address adapter_label <<EOF
 $adapter_line
 EOF
+    [ "$adapter_system" = "$system" ] || return 1
     [ -n "$bind_address" ] && [ -n "$target_address" ] || return 1
 
     mkdir -p "$(dirname "$SESSION_LOG")" "$FUNKEY_IROH_RUNTIME_DIR"
@@ -169,7 +172,7 @@ stop_netplay
 trap - INT TERM HUP
 
 sync
-/usr/bin/funkey-iroh-postgame "$system" "$game" "${rom:-}" "$marker" \
+"$POSTGAME" "$system" "$game" "${rom:-}" "$marker" \
     >>"$FUNKEY_IROH_STATE_DIR/postgame.log" 2>&1 || :
 rm -f "$marker"
 
