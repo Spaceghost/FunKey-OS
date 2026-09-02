@@ -7,7 +7,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 pub const DEFAULT_STATE_DIR: &str = "/mnt/.funkey-iroh";
+pub const DEFAULT_LIBRARY_DIR: &str = "/mnt/FunKey/Shared Games";
 pub const DEFAULT_MAX_SAVE_BYTES: u64 = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_BUNDLE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_BUNDLE_FILES: u64 = 4096;
 pub const DEFAULT_ONLINE_TIMEOUT_SECS: u64 = 8;
 
 #[derive(Clone, Debug)]
@@ -16,28 +19,29 @@ pub struct Paths {
     pub identity: PathBuf,
     pub peers: PathBuf,
     pub inbox: PathBuf,
+    pub bundle_inbox: PathBuf,
+    pub library: PathBuf,
     pub current_ticket: PathBuf,
 }
 
 impl Paths {
     pub fn from_env() -> Result<Self> {
-        let state_dir = env::var_os("FUNKEY_IROH_STATE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR));
-
-        if !state_dir.is_absolute() {
-            bail!(
-                "FUNKEY_IROH_STATE_DIR must be absolute: {}",
-                state_dir.display()
-            );
-        }
-
+        let state_dir = absolute_env_path("FUNKEY_IROH_STATE_DIR", DEFAULT_STATE_DIR)?;
         let inbox = env::var_os("FUNKEY_IROH_INBOX")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("inbox"));
+        let bundle_inbox = env::var_os("FUNKEY_IROH_BUNDLE_INBOX")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| state_dir.join("bundle-inbox"));
+        let library = absolute_env_path("FUNKEY_IROH_LIBRARY", DEFAULT_LIBRARY_DIR)?;
 
-        if !inbox.is_absolute() {
-            bail!("FUNKEY_IROH_INBOX must be absolute: {}", inbox.display());
+        for (name, path) in [
+            ("FUNKEY_IROH_INBOX", &inbox),
+            ("FUNKEY_IROH_BUNDLE_INBOX", &bundle_inbox),
+        ] {
+            if !path.is_absolute() {
+                bail!("{name} must be absolute: {}", path.display());
+            }
         }
 
         Ok(Self {
@@ -46,15 +50,21 @@ impl Paths {
             current_ticket: state_dir.join("current-ticket"),
             state_dir,
             inbox,
+            bundle_inbox,
+            library,
         })
     }
 
     pub fn ensure(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.state_dir).with_context(|| {
-            format!("create Iroh state directory {}", self.state_dir.display())
-        })?;
-        std::fs::create_dir_all(&self.inbox)
-            .with_context(|| format!("create save inbox {}", self.inbox.display()))?;
+        for path in [
+            &self.state_dir,
+            &self.inbox,
+            &self.bundle_inbox,
+            &self.library,
+        ] {
+            std::fs::create_dir_all(path)
+                .with_context(|| format!("create Iroh directory {}", path.display()))?;
+        }
         Ok(())
     }
 }
@@ -63,11 +73,35 @@ pub fn max_save_bytes() -> Result<u64> {
     parse_u64_env("FUNKEY_IROH_MAX_SAVE_BYTES", DEFAULT_MAX_SAVE_BYTES)
 }
 
+pub fn max_bundle_bytes() -> Result<u64> {
+    parse_u64_env(
+        "FUNKEY_IROH_MAX_BUNDLE_BYTES",
+        DEFAULT_MAX_BUNDLE_BYTES,
+    )
+}
+
+pub fn max_bundle_files() -> Result<u64> {
+    parse_u64_env(
+        "FUNKEY_IROH_MAX_BUNDLE_FILES",
+        DEFAULT_MAX_BUNDLE_FILES,
+    )
+}
+
 pub fn online_timeout() -> Result<Duration> {
     Ok(Duration::from_secs(parse_u64_env(
         "FUNKEY_IROH_ONLINE_TIMEOUT",
         DEFAULT_ONLINE_TIMEOUT_SECS,
     )?))
+}
+
+fn absolute_env_path(name: &str, default: &str) -> Result<PathBuf> {
+    let path = env::var_os(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(default));
+    if !path.is_absolute() {
+        bail!("{name} must be absolute: {}", path.display());
+    }
+    Ok(path)
 }
 
 fn parse_u64_env(name: &str, default: u64) -> Result<u64> {
@@ -96,7 +130,10 @@ mod tests {
 
     #[test]
     fn path_boundary_is_component_aware() {
-        assert!(path_is_under(Path::new("/mnt/Saves/a.sav"), Path::new("/mnt")));
+        assert!(path_is_under(
+            Path::new("/mnt/Saves/a.sav"),
+            Path::new("/mnt")
+        ));
         assert!(!path_is_under(
             Path::new("/mnt-not-really/a.sav"),
             Path::new("/mnt")
