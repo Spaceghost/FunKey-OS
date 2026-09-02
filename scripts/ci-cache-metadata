@@ -21,8 +21,14 @@ first_line() {
 	"$@" 2>&1 | sed -n '1p'
 }
 
+image_material() {
+	printf 'ci-image-digest=%s\n' "${FUNKEY_CI_IMAGE_DIGEST:-unversioned}"
+	printf 'ci-image-revision=%s\n' "${FUNKEY_CI_IMAGE_REVISION:-unversioned}"
+	git_object docker/focal-ci/Dockerfile
+}
+
 host_material() {
-	printf '%s\n' 'schema=funkey-build-state-v1'
+	printf '%s\n' 'schema=funkey-build-state-v2'
 	if [ -r /etc/os-release ]; then
 		(
 			. /etc/os-release
@@ -37,6 +43,7 @@ host_material() {
 	printf 'gcc=%s\n' "$(gcc -dumpfullversion -dumpversion 2>/dev/null || gcc -dumpversion)"
 	printf 'python=%s\n' "$(first_line python3 --version)"
 	printf 'zig=%s\n' "$(zig version 2>/dev/null || printf '%s' missing)"
+	image_material
 	git_object buildroot
 	git_object Makefile
 	git_object patches/buildroot
@@ -48,7 +55,7 @@ host_material() {
 }
 
 ccache_material() {
-	printf '%s\n' 'schema=funkey-ccache-v1'
+	printf '%s\n' 'schema=funkey-ccache-v2'
 	if [ -r /etc/os-release ]; then
 		(
 			. /etc/os-release
@@ -62,8 +69,10 @@ ccache_material() {
 	printf 'libc=%s\n' "$(first_line ldd --version)"
 	printf 'gcc=%s\n' "$(gcc -dumpfullversion -dumpversion 2>/dev/null || gcc -dumpversion)"
 	printf 'zig=%s\n' "$(zig version 2>/dev/null || printf '%s' missing)"
+	image_material
 	git_object buildroot
 	git_object patches/buildroot
+	git_object scripts/ci-cache-metadata
 	git_object scripts/install-zig-cc
 	git_object scripts/install-zig-host-tools
 	git_object scripts/zig-host-compiler
