@@ -7,7 +7,7 @@ variant=${2:-iroh}
 usb_profile_argument=${3:-}
 variant_version="${base_version}-${variant}"
 manifest="$repo/tools/funkey-iroh/Cargo.toml"
-target=${FUNKEY_IROH_RUST_TARGET:-armv7-unknown-linux-musleabihf}
+target=${FUNKEY_IROH_RUST_TARGET:-arm-unknown-linux-musleabihf}
 toolchain=${FUNKEY_IROH_RUST_TOOLCHAIN:-1.91.0}
 host_bin=${FUNKEY_IROH_HOST_BIN:-"$repo/FunKey/output/host/bin"}
 linker=${FUNKEY_IROH_LINKER:-"$host_bin/arm-linux-gcc"}
@@ -120,9 +120,9 @@ fi
 
 mkdir -p "$target_dir"
 export CARGO_TARGET_DIR="$target_dir"
-export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$linker"
-export CC_armv7_unknown_linux_musleabihf="$linker"
-export AR_armv7_unknown_linux_musleabihf="$archiver"
+export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$linker"
+export CC_arm_unknown_linux_musleabihf="$linker"
+export AR_arm_unknown_linux_musleabihf="$archiver"
 
 # Zig's GCC-compatible driver spells LLVM CPU names with underscores while
 # a conventional GCC cross-toolchain expects the documented hyphenated form.
@@ -133,7 +133,7 @@ case "$compiler_banner" in
     *) c_target_cpu=cortex-a7 ;;
 esac
 printf 'Iroh C compiler: %s (cpu=%s)\n' "${compiler_banner:-unknown}" "$c_target_cpu"
-export CFLAGS_armv7_unknown_linux_musleabihf="-mcpu=$c_target_cpu -mfpu=neon-vfpv4 -mfloat-abi=hard"
+export CFLAGS_arm_unknown_linux_musleabihf="-mcpu=$c_target_cpu -mfpu=neon-vfpv4 -mfloat-abi=hard"
 export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=cortex-a7 -C target-feature=+neon,+vfp4 -C link-arg=-Wl,--gc-sections"
 
 printf 'building funkey-iroh with %s for %s\n' "$rust_version" "$target"
