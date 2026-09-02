@@ -17,6 +17,22 @@ on:
         required: true
         default: funkey-iroh-hil
         type: string
+  workflow_call:
+    inputs:
+      build_run_id:
+        description: Iroh build run containing the combined USB-debug firmware
+        required: true
+        type: string
+      device_host:
+        description: USB-debug address of the attached RG Nano
+        required: false
+        default: 192.168.137.2
+        type: string
+      log_prefix:
+        description: Safe filename prefix for collected evidence
+        required: false
+        default: funkey-iroh-hil
+        type: string
 
 permissions:
   contents: read
@@ -29,6 +45,7 @@ concurrency:
 jobs:
   flash-and-exercise:
     runs-on: [self-hosted, linux, funkey-usb-debug]
+    environment: funkey-hardware
     timeout-minutes: 45
     env:
       FUNKEY_DEBUG_HOST: ${{ inputs.device_host }}
@@ -39,6 +56,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
       - name: Validate fixture
         shell: bash
@@ -96,7 +116,11 @@ jobs:
           assert data["source_commit"]
           assert data["source_tree"]
           PY
+          source_commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$metadata")
+          source_tree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_tree"])' "$metadata")
           printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+          printf 'source_tree=%s\n' "$source_tree" >> "$GITHUB_OUTPUT"
 
           native=$(find downloaded-iroh -type f \
             -path '*/debug/funkey-iroh' -print -quit)
@@ -104,6 +128,19 @@ jobs:
           chmod +x "$native"
           file "$native"
           printf 'native=%s\n' "$native" >> "$GITHUB_OUTPUT"
+
+      - name: Use the exact source that produced the firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit=${{ steps.firmware.outputs.source_commit }}
+          source_tree=${{ steps.firmware.outputs.source_tree }}
+          git cat-file -e "$source_commit^{commit}" 2>/dev/null || \
+            git fetch origin "$source_commit"
+          git checkout --detach "$source_commit"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          test "$(git rev-parse 'HEAD^{tree}')" = "$source_tree"
 
       - name: Flash, inspect Recovery, boot normal userspace
         shell: bash
