@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+version=${FUNKEY_VERSION:-$(make -s -C "$repo" print-version)}
+
+make -C "$repo" -j"${JOBS:-$(nproc)}" zig-all FUNKEY_VERSION="$version"
+"$repo/scripts/build-iroh-variant" "$version"
