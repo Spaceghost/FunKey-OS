@@ -85,7 +85,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          targets: armv7-unknown-linux-musleabihf
+          targets: arm-unknown-linux-musleabihf
 
       - name: Cache Rust and firmware downloads
         uses: actions/cache@v4
@@ -150,7 +150,7 @@ jobs:
       - name: Inspect target executables and embedded rootfs
         shell: bash
         run: |
-          daemon=.cargo-target/funkey-iroh/armv7-unknown-linux-musleabihf/release/funkey-iroh
+          daemon=.cargo-target/funkey-iroh/arm-unknown-linux-musleabihf/release/funkey-iroh
           file "$daemon"
           readelf -h "$daemon"
           if readelf -d "$daemon" 2>/dev/null | grep -q '(NEEDED)'; then
@@ -185,7 +185,7 @@ jobs:
             images/packages-Firmware-size-*-iroh*.txt
             images/iroh-*.json
             tools/funkey-iroh/Cargo.lock
-            .cargo-target/funkey-iroh/armv7-unknown-linux-musleabihf/release/funkey-iroh
+            .cargo-target/funkey-iroh/arm-unknown-linux-musleabihf/release/funkey-iroh
             .cargo-target/funkey-iroh/debug/funkey-iroh
             .cargo-target/funkey-iroh-ui-native
             br.log
