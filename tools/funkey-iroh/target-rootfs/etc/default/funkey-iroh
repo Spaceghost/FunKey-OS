@@ -1,0 +1,6 @@
+# Persistent state lives on the writable data partition.
+FUNKEY_IROH_STATE_DIR=/mnt/.funkey-iroh
+FUNKEY_IROH_INBOX=/mnt/.funkey-iroh/inbox
+FUNKEY_IROH_MAX_SAVE_BYTES=67108864
+FUNKEY_IROH_ONLINE_TIMEOUT=8
+FUNKEY_IROH_SERVICE_ARGS=serve

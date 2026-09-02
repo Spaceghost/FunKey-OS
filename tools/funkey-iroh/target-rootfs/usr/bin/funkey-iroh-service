@@ -1,0 +1,114 @@
+#!/bin/sh
+set -u
+
+DAEMON=/usr/bin/funkey-iroh
+INIT=/etc/init.d/S44funkey-iroh
+CONFIG=/etc/default/funkey-iroh
+
+[ -r "$CONFIG" ] && . "$CONFIG"
+FUNKEY_IROH_STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+FUNKEY_IROH_INBOX=${FUNKEY_IROH_INBOX:-$FUNKEY_IROH_STATE_DIR/inbox}
+ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
+TICKET_FILE=$FUNKEY_IROH_STATE_DIR/current-ticket
+LOG_FILE=$FUNKEY_IROH_STATE_DIR/service.log
+USB_NETWORK_MARKER=/mnt/usbnet
+
+export FUNKEY_IROH_STATE_DIR
+export FUNKEY_IROH_INBOX
+export FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
+export FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
+
+with_endpoint()
+{
+    was_running=0
+    if "$INIT" status >/dev/null 2>&1; then
+        was_running=1
+        "$INIT" stop || return $?
+    fi
+
+    "$DAEMON" "$@"
+    command_status=$?
+
+    if [ "$was_running" -eq 1 ]; then
+        "$INIT" start || {
+            restart_status=$?
+            echo "funkey-iroh-service: command exited $command_status and receiver restart exited $restart_status" >&2
+            return "$restart_status"
+        }
+    fi
+    return "$command_status"
+}
+
+case "${1:-}" in
+    enable)
+        mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX"
+        : > "$ENABLE_FILE"
+        if [ ! -e "$USB_NETWORK_MARKER" ]; then
+            : > "$USB_NETWORK_MARKER"
+            echo "funkey-iroh-service: enabled persistent USB networking; reconnect or reboot if usb0 is not present" >&2
+        fi
+        "$INIT" start
+        ;;
+    disable)
+        "$INIT" stop || exit $?
+        rm -f "$ENABLE_FILE"
+        ;;
+    start|stop|restart|status)
+        exec "$INIT" "$1"
+        ;;
+    ticket)
+        if [ -s "$TICKET_FILE" ]; then
+            cat "$TICKET_FILE"
+            printf '\n'
+        else
+            with_endpoint ticket
+        fi
+        ;;
+    peer|peers|id|version|help|--help|-h|--version|-V)
+        exec "$DAEMON" "$@"
+        ;;
+    send)
+        shift
+        with_endpoint save send "$@"
+        ;;
+    netplay)
+        shift
+        with_endpoint netplay "$@"
+        ;;
+    run)
+        shift
+        [ "$#" -gt 0 ] || {
+            echo "Usage: $0 run FUNKEY_IROH_ARGUMENT..." >&2
+            exit 64
+        }
+        with_endpoint "$@"
+        ;;
+    logs)
+        lines=${2:-100}
+        case "$lines" in
+            ''|*[!0-9]*) echo "lines must be an integer" >&2; exit 64 ;;
+        esac
+        tail -n "$lines" "$LOG_FILE"
+        ;;
+    inbox)
+        find "$FUNKEY_IROH_INBOX" -maxdepth 5 -type f 2>/dev/null | sort
+        ;;
+    *)
+        cat >&2 <<EOF
+Usage: $0 COMMAND [ARGS]
+
+Commands:
+  enable                         Enable and start the paired save receiver
+  disable                        Stop and disable the receiver
+  start|stop|restart|status      Control the receiver
+  ticket                         Print the current pairing ticket
+  peer add|list|remove ...       Manage paired endpoint identities
+  send PEER SYSTEM GAME FILE     Send a save, pausing the receiver safely
+  netplay host|join ...          Run a UDP tunnel, pausing the receiver safely
+  run ARGS...                    Run another endpoint command safely
+  logs [LINES]                   Show receiver logs
+  inbox                          List received save files
+EOF
+        exit 64
+        ;;
+esac

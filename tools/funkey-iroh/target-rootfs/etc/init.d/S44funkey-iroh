@@ -1,0 +1,98 @@
+#!/bin/sh
+
+DAEMON=/usr/bin/funkey-iroh
+PIDFILE=/var/run/funkey-iroh.pid
+CONFIG=/etc/default/funkey-iroh
+
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+FUNKEY_IROH_STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+FUNKEY_IROH_INBOX=${FUNKEY_IROH_INBOX:-$FUNKEY_IROH_STATE_DIR/inbox}
+FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
+FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
+FUNKEY_IROH_SERVICE_ARGS=${FUNKEY_IROH_SERVICE_ARGS:-serve}
+ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
+LOG_FILE=$FUNKEY_IROH_STATE_DIR/service.log
+
+export FUNKEY_IROH_STATE_DIR
+export FUNKEY_IROH_INBOX
+export FUNKEY_IROH_MAX_SAVE_BYTES
+export FUNKEY_IROH_ONLINE_TIMEOUT
+
+is_running()
+{
+    [ -r "$PIDFILE" ] || return 1
+    IFS= read -r pid < "$PIDFILE" || return 1
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+data_is_mounted()
+{
+    grep -q '[[:space:]]/mnt[[:space:]]' /proc/mounts 2>/dev/null
+}
+
+start_service()
+{
+    if [ ! -x "$DAEMON" ]; then
+        echo "funkey-iroh: missing $DAEMON" >&2
+        return 1
+    fi
+    if [ ! -e "$ENABLE_FILE" ]; then
+        echo "funkey-iroh: disabled"
+        return 0
+    fi
+    if ! data_is_mounted; then
+        echo "funkey-iroh: /mnt is not mounted" >&2
+        return 1
+    fi
+    if is_running; then
+        echo "funkey-iroh: already running ($pid)"
+        return 0
+    fi
+
+    mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX"
+    touch "$LOG_FILE"
+    rm -f "$PIDFILE"
+    echo "funkey-iroh: starting"
+    # FUNKEY_IROH_SERVICE_ARGS is an administrator-owned shell word list.
+    # shellcheck disable=SC2086
+    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" \
+        -- $FUNKEY_IROH_SERVICE_ARGS >>"$LOG_FILE" 2>&1
+}
+
+stop_service()
+{
+    if is_running; then
+        echo "funkey-iroh: stopping ($pid)"
+        start-stop-daemon -K -q -p "$PIDFILE" -o || return 1
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1:-}" in
+    start)
+        start_service
+        ;;
+    stop)
+        stop_service
+        ;;
+    restart)
+        stop_service
+        start_service
+        ;;
+    status)
+        if is_running; then
+            echo "funkey-iroh: running ($pid)"
+            exit 0
+        fi
+        echo "funkey-iroh: stopped"
+        exit 1
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 64
+        ;;
+esac
