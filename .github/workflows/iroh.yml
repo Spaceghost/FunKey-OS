@@ -2,18 +2,18 @@ name: FunKey-OS Iroh Build
 
 on:
   push:
-    branches: [feature/iroh-save-netplay, rg-nano-next, master]
+    branches: [rg-nano-next, master]
     paths:
       - '.github/workflows/iroh.yml'
       - '.github/workflows/iroh-hardware-loop.yml'
       - '.github/workflows/release.yml'
       - 'docs/iroh.md'
       - 'docs/release-readiness.md'
-      - 'FunKey/board/funkey/linux.config'
-      - 'scripts/build-iroh-firmware'
-      - 'scripts/build-iroh-variant'
-      - 'scripts/firmware-size-budget-iroh.json'
-      - 'scripts/test-iroh-portability'
+      - 'Makefile'
+      - 'buildroot'
+      - 'FunKey/**'
+      - 'Recovery/**'
+      - 'scripts/**'
       - 'tools/funkey-iroh/**'
       - 'tools/funkey-iroh-ui/**'
   pull_request:
@@ -24,17 +24,18 @@ on:
       - '.github/workflows/release.yml'
       - 'docs/iroh.md'
       - 'docs/release-readiness.md'
-      - 'FunKey/board/funkey/linux.config'
-      - 'scripts/build-iroh-firmware'
-      - 'scripts/build-iroh-variant'
-      - 'scripts/firmware-size-budget-iroh.json'
-      - 'scripts/test-iroh-portability'
+      - 'Makefile'
+      - 'buildroot'
+      - 'FunKey/**'
+      - 'Recovery/**'
+      - 'scripts/**'
       - 'tools/funkey-iroh/**'
       - 'tools/funkey-iroh-ui/**'
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: funkey-iroh-${{ github.ref }}
