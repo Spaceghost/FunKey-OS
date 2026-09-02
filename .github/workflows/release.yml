@@ -103,7 +103,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          targets: armv7-unknown-linux-musleabihf
+          targets: arm-unknown-linux-musleabihf
 
       - name: Download required hardware evidence
         uses: actions/download-artifact@v4
