@@ -1,0 +1,312 @@
+#!/bin/sh
+
+SELF=${SELF:-$(basename "$0")}
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+USB_DEBUG_MONITOR=${USB_DEBUG_MONITOR:-/usr/local/sbin/usb_debug_monitor}
+FUNKEY_ROOT_DEVICE=${FUNKEY_ROOT_DEVICE:-/dev/mmcblk0p2}
+FUNKEY_ROOT_INSPECT_MOUNT=${FUNKEY_ROOT_INSPECT_MOUNT:-/tmp/funkey-root-inspect}
+
+if [ ! -r "$USB_DEBUG_LIB" ]; then
+    echo "$SELF: missing $USB_DEBUG_LIB" >&2
+    exit 1
+fi
+. "$USB_DEBUG_LIB"
+
+require_debug()
+{
+    usb_debug_enabled || {
+        echo "$SELF: USB debugging is disabled in this firmware profile" >&2
+        exit 2
+    }
+}
+
+require_local_mount()
+{
+    usb_debug_mount_is_local || {
+        echo "$SELF: $USB_DEBUG_MOUNT_POINT is not mounted locally; stop USB disk sharing first" >&2
+        exit 3
+    }
+}
+
+debug_status()
+{
+    printf 'enabled=%s\n' "$(usb_debug_enabled && printf yes || printf no)"
+    printf 'mode=%s\n' "$(usb_debug_mode)"
+    printf 'session=%s\n' "$(usb_debug_session)"
+    printf 'usb_network=%s\n' "${USB_NETWORK:-unset}"
+    printf 'usb_mass_storage=%s\n' "${USB_MASS_STORAGE:-unset}"
+    printf 'update_state=%s\n' "$(usb_debug_update_state)"
+    if [ -e "$USB_DEBUG_HOLD_FILE" ]; then
+        printf 'hold_after_flash=yes\n'
+    else
+        printf 'hold_after_flash=no\n'
+    fi
+    printf 'volatile_log=%s\n' "$USB_DEBUG_VOLATILE_LOG"
+    printf 'persistent_log=%s\n' "$(usb_debug_persistent_log_path)"
+    if [ -x "$USB_DEBUG_MONITOR" ]; then
+        "$USB_DEBUG_MONITOR" --state
+    fi
+}
+
+debug_collect()
+{
+    require_debug
+    usb_debug_snapshot "${1:-manual}"
+    if usb_debug_mount_is_local; then
+        usb_debug_flush
+        printf '%s\n' "$(usb_debug_persistent_log_path)"
+    else
+        printf '%s\n' "$USB_DEBUG_VOLATILE_LOG"
+    fi
+}
+
+debug_dump()
+{
+    require_debug
+    if [ -r "$USB_DEBUG_VOLATILE_LOG" ]; then
+        cat "$USB_DEBUG_VOLATILE_LOG"
+    else
+        echo "$SELF: no current-session log yet" >&2
+        exit 4
+    fi
+}
+
+debug_history()
+{
+    require_debug
+    require_local_mount
+    usb_debug_flush >/dev/null 2>&1 || :
+
+    set -- "$USB_DEBUG_ROOT"/sessions/*.log
+    if [ "$#" -eq 1 ] && [ ! -f "$1" ]; then
+        echo "$SELF: no persistent sessions found" >&2
+        exit 4
+    fi
+
+    for debug_session_log in "$@"; do
+        [ -f "$debug_session_log" ] || continue
+        printf '\n===== persistent session: %s =====\n' "$(basename "$debug_session_log")"
+        cat "$debug_session_log"
+        printf '===== end persistent session: %s =====\n' "$(basename "$debug_session_log")"
+    done
+}
+
+debug_hold()
+{
+    require_debug
+    require_local_mount
+    mkdir -p "$USB_DEBUG_ROOT"
+    : > "$USB_DEBUG_HOLD_FILE"
+    usb_debug_log control "hold-after-flash enabled"
+    usb_debug_flush >/dev/null 2>&1 || :
+    sync
+    printf '%s\n' "$USB_DEBUG_HOLD_FILE"
+}
+
+debug_release()
+{
+    require_debug
+    require_local_mount
+    rm -f "$USB_DEBUG_HOLD_FILE"
+    usb_debug_log control "hold-after-flash disabled"
+    usb_debug_flush >/dev/null 2>&1 || :
+    sync
+}
+
+debug_boot()
+{
+    require_debug
+    debug_target=$1
+    case "$debug_target" in
+        recovery) debug_command=${RECOVERY_MODE_COMMAND:-recovery_mode} ;;
+        normal) debug_command=${NORMAL_MODE_COMMAND:-normal_mode} ;;
+        *) echo "$SELF: invalid boot target: $debug_target" >&2; exit 5 ;;
+    esac
+
+    command -v "$debug_command" >/dev/null 2>&1 || {
+        echo "$SELF: $debug_command is unavailable in $(usb_debug_mode) mode" >&2
+        exit 5
+    }
+
+    if [ "$debug_target" = normal ] && usb_debug_mount_is_local; then
+        rm -f "$USB_DEBUG_HOLD_FILE"
+    fi
+    usb_debug_set_update_state "booting-$debug_target"
+    usb_debug_snapshot "before-boot-$debug_target"
+    usb_debug_flush >/dev/null 2>&1 || :
+    sync
+    exec "$debug_command"
+}
+
+debug_flash()
+{
+    require_debug
+    command -v funkey-flash >/dev/null 2>&1 || {
+        echo "$SELF: funkey-flash is unavailable in $(usb_debug_mode) mode" >&2
+        exit 6
+    }
+    [ "$#" -eq 1 ] || {
+        echo "Usage: $SELF flash /mnt/FunKey-<version>.fwu" >&2
+        exit 6
+    }
+    exec funkey-flash "$1"
+}
+
+debug_root_status()
+{
+    require_debug
+    [ "$(usb_debug_mode)" = recovery ] || {
+        echo "$SELF: root-status is only safe from Recovery" >&2
+        exit 7
+    }
+    [ -b "$FUNKEY_ROOT_DEVICE" ] || {
+        echo "$SELF: missing root device: $FUNKEY_ROOT_DEVICE" >&2
+        exit 7
+    }
+
+    debug_result=0
+    debug_mounted_here=0
+    debug_existing_mount=
+    if [ -r /proc/mounts ]; then
+        while IFS=' ' read -r debug_device debug_mount debug_rest; do
+            if [ "$debug_device" = "$FUNKEY_ROOT_DEVICE" ]; then
+                debug_existing_mount=$debug_mount
+                break
+            fi
+        done < /proc/mounts
+    fi
+
+    usb_debug_log root-status "begin device=$FUNKEY_ROOT_DEVICE existing_mount=${debug_existing_mount:-none}"
+    if [ -n "$debug_existing_mount" ]; then
+        debug_inspect_mount=$debug_existing_mount
+        debug_result=10
+        usb_debug_log root-status "device already mounted; skipping e2fsck and using mount=$debug_existing_mount"
+    else
+        debug_fsck_status=0
+        if command -v e2fsck >/dev/null 2>&1; then
+            usb_debug_run root-fsck e2fsck -fn "$FUNKEY_ROOT_DEVICE"
+            debug_fsck_status=$?
+            usb_debug_log root-status "e2fsck_status=$debug_fsck_status"
+            if [ "$debug_fsck_status" -ne 0 ]; then
+                debug_result=9
+            fi
+        fi
+
+        mkdir -p "$FUNKEY_ROOT_INSPECT_MOUNT"
+        if ! usb_debug_run root-mount \
+            mount -t ext4 -o ro "$FUNKEY_ROOT_DEVICE" "$FUNKEY_ROOT_INSPECT_MOUNT"
+        then
+            usb_debug_log root-status "read-only mount failed"
+            usb_debug_flush >/dev/null 2>&1 || :
+            exit 8
+        fi
+        debug_inspect_mount=$FUNKEY_ROOT_INSPECT_MOUNT
+        debug_mounted_here=1
+    fi
+
+    debug_report=/tmp/funkey-root-status.$$
+    {
+        printf 'device=%s\n' "$FUNKEY_ROOT_DEVICE"
+        printf 'inspect_mount=%s\n' "$debug_inspect_mount"
+        printf 'already_mounted=%s\n' "$( [ -n "$debug_existing_mount" ] && printf yes || printf no )"
+        printf 'e2fsck_status=%s\n' "${debug_fsck_status:-skipped}"
+        printf '%s\n' '-- target versions --'
+        [ -r "$debug_inspect_mount/etc/sw-versions" ] &&
+            cat "$debug_inspect_mount/etc/sw-versions"
+        printf '%s\n' '-- target init --'
+        ls -l "$debug_inspect_mount/sbin/init" \
+            "$debug_inspect_mount/etc/inittab" \
+            "$debug_inspect_mount/etc/init.d/rcS" 2>&1
+        printf '%s\n' '-- target filesystem config --'
+        [ -r "$debug_inspect_mount/etc/fstab" ] &&
+            cat "$debug_inspect_mount/etc/fstab"
+        printf '%s\n' '-- target usb profile --'
+        [ -r "$debug_inspect_mount/etc/default/usb-gadget" ] &&
+            cat "$debug_inspect_mount/etc/default/usb-gadget"
+        printf '%s\n' '-- target root usage --'
+        df -h "$debug_inspect_mount" 2>&1 || :
+    } > "$debug_report" 2>&1
+    cat "$debug_report"
+    cat "$debug_report" >> "$USB_DEBUG_VOLATILE_LOG"
+    rm -f "$debug_report"
+
+    if [ "$debug_mounted_here" -eq 1 ]; then
+        usb_debug_run root-umount umount "$FUNKEY_ROOT_INSPECT_MOUNT"
+        debug_unmount_status=$?
+        if [ "$debug_unmount_status" -ne 0 ]; then
+            debug_result=$debug_unmount_status
+        fi
+    else
+        debug_unmount_status=skipped
+    fi
+
+    usb_debug_log root-status \
+        "end result=$debug_result unmount_status=$debug_unmount_status"
+    usb_debug_flush >/dev/null 2>&1 || :
+    return "$debug_result"
+}
+
+usage()
+{
+    cat <<EOF
+Usage: $SELF COMMAND [ARG]
+
+Commands:
+  status                 Show profile, boot mode, mount, USB, network, and update state
+  collect [LABEL]        Append a full snapshot and persist it when /mnt is local
+  dump                   Print the current boot session log
+  history                Print every persistent boot session while /mnt is local
+  hold                   Stay in Recovery after the next successful flash
+  release                Clear the hold-after-flash marker
+  update-state           Print the durable update state
+  root-status            Check and inspect the flashed rootfs from Recovery
+  flash FILE             Validate FILE and reboot into Recovery
+  boot-recovery          Select Recovery and reboot
+  boot-normal            Select the normal rootfs and reboot
+EOF
+}
+
+case "${1:-}" in
+    status)
+        debug_status
+        ;;
+    collect)
+        shift
+        debug_collect "${1:-manual}"
+        ;;
+    dump)
+        debug_dump
+        ;;
+    history)
+        debug_history
+        ;;
+    hold)
+        debug_hold
+        ;;
+    release)
+        debug_release
+        ;;
+    update-state)
+        usb_debug_update_state
+        ;;
+    root-status)
+        debug_root_status
+        ;;
+    flash)
+        shift
+        debug_flash "$@"
+        ;;
+    boot-recovery)
+        debug_boot recovery
+        ;;
+    boot-normal)
+        debug_boot normal
+        ;;
+    help|-h|--help|'')
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 64
+        ;;
+esac

@@ -1,0 +1,156 @@
+#!/bin/sh
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+[ -r "$USB_DEBUG_LIB" ] || exit 0
+. "$USB_DEBUG_LIB"
+
+usb_debug_enabled || exit 0
+
+USB_DEBUG_POLL_SECONDS=${USB_DEBUG_POLL_SECONDS:-1}
+USB_DEBUG_FLUSH_EVERY=${USB_DEBUG_FLUSH_EVERY:-15}
+USB_DEBUG_SNAPSHOT_ON_CHANGE=${USB_DEBUG_SNAPSHOT_ON_CHANGE:-0}
+USB_DEBUG_GADGET=${USB_DEBUG_GADGET:-/sys/kernel/config/usb_gadget/FunKey}
+USB_DEBUG_BACKING_FILE=${USB_DEBUG_BACKING_FILE:-$USB_DEBUG_GADGET/functions/mass_storage.mmcblk0p4/lun.0/file}
+USB_DEBUG_DHCPCD_PIDFILE=${USB_DEBUG_DHCPCD_PIDFILE:-/var/run/dhcpcd/pid}
+USB_DEBUG_DROPBEAR_PIDFILE=${USB_DEBUG_DROPBEAR_PIDFILE:-/var/run/dropbear.pid}
+
+usb_debug_read_one_line()
+{
+    if [ -r "$1" ]; then
+        IFS= read -r usb_debug_value < "$1" || usb_debug_value=
+        printf '%s\n' "${usb_debug_value:-empty}"
+    else
+        printf '%s\n' absent
+    fi
+}
+
+usb_debug_pid_state()
+{
+    if [ ! -r "$1" ]; then
+        printf '%s\n' down
+        return 0
+    fi
+
+    IFS= read -r usb_debug_pid < "$1" || usb_debug_pid=
+    case "$usb_debug_pid" in
+        ''|*[!0-9]*) printf '%s\n' stale ;;
+        *)
+            if kill -0 "$usb_debug_pid" 2>/dev/null; then
+                printf 'up:%s\n' "$usb_debug_pid"
+            else
+                printf 'stale:%s\n' "$usb_debug_pid"
+            fi
+            ;;
+    esac
+}
+
+usb_debug_update_files_state()
+{
+    usb_debug_update_count=0
+    usb_debug_update_names=
+    for usb_debug_update in "$USB_DEBUG_MOUNT_POINT"/FunKey-*.fwu; do
+        [ -e "$usb_debug_update" ] || continue
+        usb_debug_update_count=$((usb_debug_update_count + 1))
+        usb_debug_update_name=$(basename "$usb_debug_update" | tr ' ' '_')
+        if [ -n "$usb_debug_update_names" ]; then
+            usb_debug_update_names=$usb_debug_update_names,$usb_debug_update_name
+        else
+            usb_debug_update_names=$usb_debug_update_name
+        fi
+    done
+    [ -n "$usb_debug_update_names" ] || usb_debug_update_names=none
+    printf '%s:%s\n' "$usb_debug_update_count" "$usb_debug_update_names"
+}
+
+usb_debug_mount_state()
+{
+    if usb_debug_mount_is_local; then
+        printf '%s\n' local
+        return 0
+    fi
+
+    if [ -r "$USB_DEBUG_BACKING_FILE" ] &&
+       grep -q '^/dev/mmcblk0p4$' "$USB_DEBUG_BACKING_FILE" 2>/dev/null; then
+        printf '%s\n' exported
+        return 0
+    fi
+
+    printf '%s\n' unmounted
+}
+
+usb_debug_udc_state()
+{
+    usb_debug_udc_name=$(usb_debug_read_one_line "$USB_DEBUG_GADGET/UDC")
+    if [ "$usb_debug_udc_name" = absent ] || [ "$usb_debug_udc_name" = empty ]; then
+        printf '%s\n' "$usb_debug_udc_name"
+        return 0
+    fi
+
+    usb_debug_udc_link=/sys/class/udc/$usb_debug_udc_name
+    usb_debug_udc_link_state=$(usb_debug_read_one_line "$usb_debug_udc_link/state")
+    usb_debug_udc_speed=$(usb_debug_read_one_line "$usb_debug_udc_link/current_speed")
+    printf '%s:%s:%s\n' "$usb_debug_udc_name" "$usb_debug_udc_link_state" "$usb_debug_udc_speed"
+}
+
+usb_debug_state()
+{
+    printf 'mode=%s mount=%s udc=%s usb0=%s dhcpcd=%s dropbear=%s update=%s archives=%s\n' \
+        "$(usb_debug_mode)" \
+        "$(usb_debug_mount_state)" \
+        "$(usb_debug_udc_state)" \
+        "$(usb_debug_read_one_line /sys/class/net/usb0/operstate)" \
+        "$(usb_debug_pid_state "$USB_DEBUG_DHCPCD_PIDFILE")" \
+        "$(usb_debug_pid_state "$USB_DEBUG_DROPBEAR_PIDFILE")" \
+        "$(usb_debug_update_state | tr ' ' '_')" \
+        "$(usb_debug_update_files_state)"
+}
+
+case "${1:-}" in
+    --state)
+        usb_debug_state
+        exit 0
+        ;;
+    --once)
+        usb_debug_current_state=$(usb_debug_state)
+        usb_debug_log monitor "state $usb_debug_current_state"
+        usb_debug_snapshot monitor-once
+        printf '%s\n' "$usb_debug_current_state"
+        exit 0
+        ;;
+    --flush)
+        usb_debug_flush
+        exit $?
+        ;;
+esac
+
+usb_debug_log monitor "started poll_seconds=$USB_DEBUG_POLL_SECONDS"
+usb_debug_previous_state=
+usb_debug_iteration=0
+
+usb_debug_monitor_exit()
+{
+    usb_debug_log monitor "stopping"
+    usb_debug_flush >/dev/null 2>&1 || :
+    exit 0
+}
+trap usb_debug_monitor_exit INT TERM
+
+while :; do
+    usb_debug_current_state=$(usb_debug_state)
+    if [ "$usb_debug_current_state" != "$usb_debug_previous_state" ]; then
+        usb_debug_log monitor "transition old=[$usb_debug_previous_state] new=[$usb_debug_current_state]"
+        if [ -z "$usb_debug_previous_state" ]; then
+            usb_debug_snapshot monitor-start
+        elif [ "$USB_DEBUG_SNAPSHOT_ON_CHANGE" = 1 ]; then
+            usb_debug_snapshot state-change
+        fi
+        usb_debug_previous_state=$usb_debug_current_state
+    fi
+
+    usb_debug_iteration=$((usb_debug_iteration + 1))
+    if [ "$usb_debug_iteration" -ge "$USB_DEBUG_FLUSH_EVERY" ]; then
+        usb_debug_flush >/dev/null 2>&1 || :
+        usb_debug_iteration=0
+    fi
+    sleep "$USB_DEBUG_POLL_SECONDS"
+done

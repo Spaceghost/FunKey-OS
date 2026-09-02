@@ -1,4 +1,5 @@
 /download/
+/.buildroot-ccache/
 */output/*
 *~
 br.log

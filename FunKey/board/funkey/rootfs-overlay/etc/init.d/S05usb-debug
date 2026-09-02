@@ -1,0 +1,84 @@
+#!/bin/sh
+
+DAEMON=${USB_DEBUG_MONITOR_DAEMON:-/usr/local/sbin/usb_debug_monitor}
+PIDFILE=${USB_DEBUG_MONITOR_PIDFILE:-/var/run/usb_debug_monitor.pid}
+BUSYBOX=${USB_DEBUG_MONITOR_BUSYBOX:-/bin/busybox}
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+
+monitor_is_running()
+{
+    monitor_pid=
+    [ -r "$PIDFILE" ] || return 1
+    IFS= read -r monitor_pid < "$PIDFILE" || return 1
+    case "$monitor_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$monitor_pid" 2>/dev/null
+}
+
+case "$1" in
+    start)
+        echo -n "Starting persistent USB debug monitor: "
+        if [ ! -r "$USB_DEBUG_LIB" ]; then
+            echo "MISSING"
+            exit 1
+        fi
+        . "$USB_DEBUG_LIB"
+        if ! usb_debug_enabled; then
+            echo "DISABLED"
+            exit 0
+        fi
+        usb_debug_set_update_state "$(usb_debug_mode)-init-start"
+        usb_debug_log init "starting early USB debug monitor"
+        if monitor_is_running; then
+            echo "OK"
+            exit 0
+        fi
+        rm -f "$PIDFILE"
+        start-stop-daemon -S -q -x "$BUSYBOX" -p "$PIDFILE" \
+            -m -b -o -- sh "$DAEMON"
+        monitor_status=$?
+        if [ "$monitor_status" -eq 0 ]; then
+            echo "OK"
+        else
+            echo "ERROR"
+        fi
+        exit "$monitor_status"
+        ;;
+    stop)
+        echo -n "Stopping persistent USB debug monitor: "
+        monitor_status=0
+        if monitor_is_running; then
+            start-stop-daemon -K -q -x "$BUSYBOX" -p "$PIDFILE" -o ||
+                monitor_status=1
+            sleep 1
+            if kill -0 "$monitor_pid" 2>/dev/null; then
+                start-stop-daemon -K -q -s KILL -x "$BUSYBOX" \
+                    -p "$PIDFILE" -o || monitor_status=1
+            fi
+        fi
+        rm -f "$PIDFILE"
+        if [ "$monitor_status" -eq 0 ]; then
+            echo "OK"
+        else
+            echo "ERROR"
+        fi
+        exit "$monitor_status"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    status)
+        if monitor_is_running; then
+            echo "running ($monitor_pid)"
+            exit 0
+        fi
+        echo "stopped"
+        exit 1
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac

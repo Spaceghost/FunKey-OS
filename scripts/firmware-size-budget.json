@@ -1,0 +1,30 @@
+{
+  "artifact_bytes": {
+    "firmware_update": {
+      "warn": 52428800,
+      "max": 67108864
+    },
+    "sd_image_xz": {
+      "warn": 62914560,
+      "max": 83886080
+    }
+  },
+  "filesystem_free_bytes": {
+    "FunKey": {
+      "min": 16777216
+    },
+    "Recovery": {
+      "min": 4194304
+    }
+  },
+  "filesystem_used_bytes": {
+    "FunKey": {
+      "warn": 125829120,
+      "max": 167772160
+    },
+    "Recovery": {
+      "warn": 50331648,
+      "max": 60817408
+    }
+  }
+}
