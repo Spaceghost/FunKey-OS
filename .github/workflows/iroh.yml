@@ -173,6 +173,7 @@ jobs:
         with:
           name: FunKey-OS Iroh firmware
           if-no-files-found: warn
+          include-hidden-files: true
           path: |
             images/FunKey-rootfs-*-iroh*.fwu
             images/FunKey-sdcard-*-iroh*.img.xz
