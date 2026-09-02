@@ -9,10 +9,10 @@ sync_peer="$root/usr/bin/funkey-iroh-sync-peer"
 inbox="$root/usr/bin/funkey-iroh-inbox"
 outbox="$root/usr/bin/funkey-iroh-outbox"
 postgame="$root/usr/bin/funkey-iroh-postgame"
+launch="$root/usr/bin/funkey-iroh-launch"
 
 for script in \
-    "$pairing" "$sync_peer" "$inbox" "$outbox" "$postgame" \
-    "$root/usr/bin/funkey-iroh-launch" \
+    "$pairing" "$sync_peer" "$inbox" "$outbox" "$postgame" "$launch" \
     "$root/usr/bin/funkey-iroh-session" \
     "$root/usr/bin/funkey-iroh-service" \
     "$root/usr/bin/funkey-iroh-sync-worker" \
@@ -31,7 +31,8 @@ data="$tmp/mnt"
 state="$data/.funkey-iroh"
 public="$data/FunKey/Iroh"
 bin="$tmp/bin"
-mkdir -p "$state" "$public" "$bin"
+run="$tmp/run"
+mkdir -p "$state" "$public" "$bin" "$run"
 
 cat > "$bin/fake-daemon" <<'EOF'
 #!/bin/sh
@@ -77,6 +78,20 @@ case "$1" in
     send)
         printf '%s\n' "$*" >> "${FAKE_SEND_LOG:?}"
         ;;
+    netplay)
+        {
+            printf '%s' "$1"
+            shift
+            for argument in "$@"; do
+                printf '\t%s' "$argument"
+            done
+            printf '\n'
+        } >> "${FAKE_NETPLAY_LOG:?}"
+        trap 'exit 0' INT TERM HUP
+        while :; do
+            sleep 1
+        done
+        ;;
     *)
         exit 64
         ;;
@@ -94,8 +109,10 @@ export FUNKEY_IROH_SERVICE="$bin/fake-service"
 export FUNKEY_IROH_COMMON="$common"
 export FAKE_PEER_DB="$tmp/peers.tsv"
 export FAKE_SEND_LOG="$tmp/send.log"
+export FAKE_NETPLAY_LOG="$tmp/netplay.log"
 : > "$FAKE_PEER_DB"
 : > "$FAKE_SEND_LOG"
+: > "$FAKE_NETPLAY_LOG"
 
 pair_output=$("$pairing" export)
 grep -q '^rg-nano-' <<<"$pair_output"
@@ -160,5 +177,54 @@ test "$("$outbox" count)" = 1
 "$outbox" flush-one
 grep -q '^send pocket gbc Pokemon_Crystal ' "$FAKE_SEND_LOG"
 test "$("$outbox" count)" = 0
+
+# The pre-game action and adapter records are actual tab-separated fields.
+# A literal "\t" IFS would split on the letters "\" and "t" and corrupt the
+# peer, ports, or adapter label.
+cat > "$bin/fake-ui" <<'EOF'
+#!/bin/sh
+printf 'join\tpocket\n' > "${FUNKEY_IROH_ACTION_FILE:?}"
+EOF
+cat > "$bin/fake-session" <<'EOF'
+#!/bin/sh
+case "$1" in
+    adapter)
+        [ "$2" = gbc ] || exit 1
+        printf 'gbc\t127.0.0.1:55300\t127.0.0.1:55301\tTest adapter\n'
+        ;;
+    *) exit 64 ;;
+esac
+EOF
+cat > "$bin/fake-postgame" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${FAKE_POSTGAME_LOG:?}"
+EOF
+cat > "$bin/fake-emulator" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${FAKE_EMULATOR_LOG:?}"
+EOF
+chmod +x \
+    "$bin/fake-ui" "$bin/fake-session" "$bin/fake-postgame" "$bin/fake-emulator"
+
+export FUNKEY_IROH_UI="$bin/fake-ui"
+export FUNKEY_IROH_SESSION="$bin/fake-session"
+export FUNKEY_IROH_POSTGAME="$bin/fake-postgame"
+export FUNKEY_IROH_ACTION_FILE="$run/launch.action"
+export FUNKEY_IROH_SESSION_FILE="$run/session"
+export FUNKEY_IROH_SESSION_LOG="$tmp/session.log"
+export FUNKEY_IROH_RUNTIME_DIR="$run"
+export FAKE_POSTGAME_LOG="$tmp/postgame.log"
+export FAKE_EMULATOR_LOG="$tmp/emulator.log"
+: > "$FAKE_POSTGAME_LOG"
+: > "$FAKE_EMULATOR_LOG"
+
+"$launch" --system gbc -- \
+    "$bin/fake-emulator" "$data/Pokemon_Crystal.gbc"
+
+expected_netplay=$(printf 'netplay\tjoin\tpocket\t127.0.0.1:55300\t127.0.0.1:55301')
+grep -Fqx "$expected_netplay" "$FAKE_NETPLAY_LOG"
+grep -Fqx "$data/Pokemon_Crystal.gbc" "$FAKE_EMULATOR_LOG"
+grep -q '^gbc Pokemon_Crystal ' "$FAKE_POSTGAME_LOG"
+test ! -e "$FUNKEY_IROH_SESSION_FILE"
 
 printf '%s\n' 'Iroh UI helper tests passed'
