@@ -167,7 +167,9 @@ for arg in "$@"; do
 			args+=("-Oz") ;;
 		-Qunused-arguments)
 			;;
-		-mapcs|-mno-sched-prolog|-mno-thumb-interwork|-mno-single-pic-base|-march=armv5t|-march=armv7-a+neon-vfpv4|-mcpu=cortex_a7|-mtune=cortex-a7|-mtune=generic-armv7-a|-mvectorize-with-neon-quad|-mfpu=*|-mfloat-abi=*|-msoft-float|-fstack-usage|-flto|-flto=*)
+		-mapcs|-mno-sched-prolog|-mno-thumb-interwork|-mno-single-pic-base|-march=armv5t|-march=armv7-a+neon-vfpv4|-mcpu=cortex_a7|-mcpu=cortex-a7|-mtune=cortex-a7|-mtune=generic-armv7-a|-mvectorize-with-neon-quad|-mfpu=*|-mfloat-abi=*|-msoft-float|-fstack-usage|-flto|-flto=*)
+			# Normalize/consume legacy GCC ARM tuning flags. The canonical Zig
+			# target and CPU are appended exactly once below.
 			;;
 		-nostdinc)
 			use_sysroot_headers=false
