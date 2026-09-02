@@ -129,7 +129,11 @@ for arg in "$@"; do
 		-Wl,-T|-Wl,-Ttext)
 			args+=("$arg")
 			next_is_linker_value=true ;;
-		--target=arm-linux|--gcc-toolchain=*|--prefix=*)
+		--target=arm-linux|--target=armv7-unknown-linux-musleabihf|--target=arm-unknown-linux-musleabihf|--target=armv7-linux-musleabihf|--gcc-toolchain=*|--prefix=*)
+			# cc-rs forwards Rust target triples to the selected C compiler.
+			# This wrapper already selects the canonical Zig target below, so
+			# discard both Buildroot's legacy spelling and Rust's ARMv7 spelling
+			# instead of passing two incompatible target options to Zig.
 			;;
 		--gc-sections|--no-dynamic-linker|-Bstatic)
 			args+=("-Wl,$arg") ;;
