@@ -1,0 +1,86 @@
+name: Build Focal CI image
+
+on:
+  push:
+    branches:
+      - master
+      - rg-nano-next
+      - feature/persistent-usb-debug-loop
+    paths:
+      - docker/focal-ci/**
+      - .github/workflows/build-focal-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: funkey-focal-ci-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: spaceghost/funkey-os-build
+  IMAGE_TAG: focal-zig-0.16.0-v1
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the image definition
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Log in to GitHub Container Registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            docker login "$REGISTRY" --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build, verify, and publish the pinned Focal image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$REGISTRY/$IMAGE_NAME"
+          revision_tag="sha-$GITHUB_SHA"
+
+          docker build --pull \
+            --build-arg "IMAGE_REVISION=$GITHUB_SHA" \
+            --tag "$image:$revision_tag" \
+            --tag "$image:$IMAGE_TAG" \
+            docker/focal-ci
+
+          docker run --rm "$image:$revision_tag" sh -ec '
+            test "$(zig version)" = 0.16.0
+            test "$(python --version 2>&1)" = "Python 3.8.10"
+            git --version
+            gcc --version | sed -n "1p"
+            locale -a | grep -qx en_US.utf8
+          '
+
+          docker push "$image:$revision_tag"
+          docker push "$image:$IMAGE_TAG"
+
+          docker pull "$image:$revision_tag" >/dev/null
+          image_ref=$(docker inspect \
+            --format '{{ index .RepoDigests 0 }}' \
+            "$image:$revision_tag")
+
+          printf 'reference=%s\n' "$image_ref" >> "$GITHUB_OUTPUT"
+          {
+            echo '## Published FunKey-OS build image'
+            echo
+            echo '```text'
+            echo "$image_ref"
+            echo '```'
+            echo
+            echo "Revision tag: \`$image:$revision_tag\`"
+            echo "Maintenance tag: \`$image:$IMAGE_TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
