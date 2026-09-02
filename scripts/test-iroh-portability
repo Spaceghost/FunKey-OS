@@ -5,6 +5,18 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 daemon=${1:-"$repo/.cargo-target/funkey-iroh-native/debug/funkey-iroh"}
 ui_binary=${2:-}
 
+if [[ ! -x "$daemon" ]] &&
+   [[ "$(basename "$daemon")" == funkey-iroh ]] &&
+   [[ "$(basename "$(dirname "$daemon")")" == debug ]] &&
+   command -v cargo >/dev/null 2>&1; then
+    target_dir=$(dirname "$(dirname "$daemon")")
+    printf 'building native funkey-iroh test executable in %s\n' "$target_dir" >&2
+    CARGO_TARGET_DIR="$target_dir" cargo build \
+        --manifest-path "$repo/tools/funkey-iroh/Cargo.toml" \
+        --locked \
+        --bin funkey-iroh
+fi
+
 [[ -x "$daemon" ]] || {
     printf 'native funkey-iroh executable is missing: %s\n' "$daemon" >&2
     exit 2
