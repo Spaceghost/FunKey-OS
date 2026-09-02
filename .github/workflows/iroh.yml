@@ -51,7 +51,7 @@ jobs:
       LANG: en_US.UTF-8
       LC_ALL: en_US.UTF-8
       FORCE_UNSAFE_CONFIGURE: "1"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target/funkey-iroh
+      CARGO_TARGET_DIR: .cargo-target/funkey-iroh
 
     steps:
       - name: Install Focal firmware and native UI dependencies
@@ -104,6 +104,7 @@ jobs:
           sdl-config --version
 
       - name: Generate and retain the dependency lock
+        shell: bash
         run: |
           cargo generate-lockfile \
             --manifest-path tools/funkey-iroh/Cargo.toml
@@ -119,9 +120,16 @@ jobs:
       - name: Test native daemon, bundle transport, lifecycle helpers, and UI
         shell: bash
         run: |
+          cargo build \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked \
+            --bin funkey-iroh
+
           cargo test \
             --manifest-path tools/funkey-iroh/Cargo.toml \
             --locked
+
+          test -x .cargo-target/funkey-iroh/debug/funkey-iroh
 
           cc -std=gnu99 -O2 -Wall -Wextra -Werror \
             $(sdl-config --cflags) \
