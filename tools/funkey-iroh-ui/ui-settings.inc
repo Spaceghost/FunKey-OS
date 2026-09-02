@@ -339,7 +339,7 @@ static int main_ui(void)
         snprintf(subtitle, sizeof(subtitle),
                  "%d peer%s  |  %d inbox  |  %d queued",
                  peer_count, peer_count == 1 ? "" : "s", inbox_count, queued);
-        choice = run_menu("Iroh", subtitle, menu, 10, 0, 0);
+        choice = run_menu("Iroh", subtitle, menu, 11, 0, 0);
         switch (choice) {
         case 0:
             service_toggle();
