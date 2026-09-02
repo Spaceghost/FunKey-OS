@@ -1,0 +1,161 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || {
+    echo "missing $COMMON" >&2
+    exit 1
+}
+. "$COMMON"
+
+PAIRING_DIR=${FUNKEY_IROH_PAIRING_DIR:-$FUNKEY_IROH_PUBLIC_DIR/Pairing}
+IMPORTED_DIR=${FUNKEY_IROH_IMPORTED_DIR:-$PAIRING_DIR/Imported}
+DEVICE_NAME_FILE=${FUNKEY_IROH_DEVICE_NAME_FILE:-$FUNKEY_IROH_STATE_DIR/device-name}
+NAME_DROP_FILE=${FUNKEY_IROH_NAME_DROP_FILE:-$FUNKEY_IROH_PUBLIC_DIR/device-name.txt}
+
+device_name()
+{
+    if [ -r "$DEVICE_NAME_FILE" ]; then
+        name=$(sed -n '1p' "$DEVICE_NAME_FILE" | tr -d '\r\n')
+        if iroh_valid_name "$name"; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    fi
+
+    endpoint_id=$("$FUNKEY_IROH_DAEMON" id 2>/dev/null) || return 1
+    short_id=$(printf '%s' "$endpoint_id" | cut -c1-8)
+    printf 'rg-nano-%s\n' "$short_id"
+}
+
+set_name()
+{
+    requested=${1:-}
+    if [ -z "$requested" ] && [ -r "$NAME_DROP_FILE" ]; then
+        requested=$(sed -n '1p' "$NAME_DROP_FILE" | tr -d '\r\n')
+    fi
+    iroh_valid_name "$requested" ||
+        iroh_die 64 "device name must use 1-64 letters, digits, dot, dash, or underscore"
+
+    iroh_ensure_state
+    printf '%s\n' "$requested" | iroh_atomic_write "$DEVICE_NAME_FILE" ||
+        iroh_die 1 "cannot save device name"
+    printf '%s\n' "$requested"
+}
+
+export_card()
+{
+    iroh_data_is_mounted || iroh_die 1 "/mnt is not mounted"
+    iroh_ensure_state
+    mkdir -p "$PAIRING_DIR"
+
+    name=$(device_name) || iroh_die 1 "cannot create device identity"
+    endpoint_id=$("$FUNKEY_IROH_DAEMON" id) || iroh_die 1 "cannot read endpoint identity"
+    ticket=$("$FUNKEY_IROH_SERVICE" ticket) || iroh_die 1 "cannot create endpoint ticket"
+    card="$PAIRING_DIR/$name.pair"
+    temporary="${card}.tmp.$$"
+
+    umask 077
+    {
+        printf '%s\n' 'FUNKEY-IROH-PAIRING 1'
+        printf 'name=%s\n' "$name"
+        printf 'endpoint_id=%s\n' "$endpoint_id"
+        printf 'ticket=%s\n' "$ticket"
+    } > "$temporary" || {
+        rm -f "$temporary"
+        iroh_die 1 "cannot write pairing card"
+    }
+    sync "$temporary" 2>/dev/null || sync
+    mv "$temporary" "$card" || iroh_die 1 "cannot install pairing card"
+
+    printf '%s\t%s\t%s\n' "$name" "$card" "$ticket"
+}
+
+import_one()
+{
+    card=$1
+    magic=$(sed -n '1p' "$card" | tr -d '\r')
+    [ "$magic" = 'FUNKEY-IROH-PAIRING 1' ] || {
+        printf 'SKIP\t%s\tinvalid format\n' "$card"
+        return 0
+    }
+
+    name=$(sed -n 's/^name=//p' "$card" | sed -n '1p' | tr -d '\r\n')
+    endpoint_id=$(sed -n 's/^endpoint_id=//p' "$card" | sed -n '1p' | tr -d '\r\n')
+    ticket=$(sed -n 's/^ticket=//p' "$card" | sed -n '1p' | tr -d '\r\n')
+
+    iroh_valid_name "$name" || {
+        printf 'SKIP\t%s\tinvalid peer name\n' "$card"
+        return 0
+    }
+    if [ -z "$endpoint_id" ] || [ -z "$ticket" ] ||
+       ! printf '%s:%s' "$endpoint_id" "$ticket" |
+            grep -Eq '^[A-Za-z0-9._:/?&=%+-]+$'; then
+        printf 'SKIP\t%s\tinvalid endpoint data\n' "$card"
+        return 0
+    fi
+
+    own_id=$("$FUNKEY_IROH_DAEMON" id 2>/dev/null) || own_id=
+    if [ -n "$own_id" ] && [ "$endpoint_id" = "$own_id" ]; then
+        printf 'SKIP\t%s\tthis device\n' "$card"
+        return 0
+    fi
+
+    if output=$("$FUNKEY_IROH_DAEMON" peer add "$name" "$ticket" 2>&1); then
+        mkdir -p "$IMPORTED_DIR"
+        destination="$IMPORTED_DIR/$(basename "$card")"
+        mv "$card" "$destination" 2>/dev/null || :
+        printf 'IMPORTED\t%s\t%s\n' "$name" "$endpoint_id"
+    else
+        printf 'ERROR\t%s\t%s\n' "$name" "$output"
+    fi
+}
+
+import_cards()
+{
+    iroh_data_is_mounted || iroh_die 1 "/mnt is not mounted"
+    iroh_ensure_state
+    mkdir -p "$PAIRING_DIR" "$IMPORTED_DIR"
+
+    found=0
+    for card in "$PAIRING_DIR"/*.pair; do
+        [ -f "$card" ] || continue
+        found=1
+        import_one "$card"
+    done
+    if [ "$found" -eq 0 ]; then
+        printf '%s\n' 'NONE	No pairing cards found'
+    fi
+}
+
+case "${1:-}" in
+    export)
+        export_card
+        ;;
+    import)
+        import_cards
+        ;;
+    name)
+        device_name
+        ;;
+    set-name)
+        shift
+        set_name "${1:-}"
+        ;;
+    import-name)
+        set_name ""
+        ;;
+    *)
+        cat >&2 <<EOF
+Usage: $(basename "$0") COMMAND
+
+Commands:
+  export             Write this device's .pair card and print name/path/ticket
+  import             Import every .pair card in the public Pairing directory
+  name               Print this device's display name
+  set-name NAME      Set a validated device name
+  import-name        Read the name from $NAME_DROP_FILE
+EOF
+        exit 64
+        ;;
+esac

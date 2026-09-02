@@ -1,0 +1,15 @@
+# FunKey Iroh multiplayer adapters
+#
+# Columns are tab-separated:
+# SYSTEM    LOCAL_BIND        EMULATOR_TARGET    LABEL
+#
+# No bundled PicoArch core currently exposes a stable UDP or link-cable socket,
+# so shipping a fake adapter here would produce a pretty button that cannot
+# actually play a game. Emulator-specific adapters can be added without
+# changing the Iroh transport or launcher UI. User overrides live at:
+#
+#   /mnt/.funkey-iroh/adapters.tsv
+#
+# Example for a future UDP-capable adapter:
+#
+# gb_gbc	127.0.0.1:55300	127.0.0.1:55301	Game Boy link

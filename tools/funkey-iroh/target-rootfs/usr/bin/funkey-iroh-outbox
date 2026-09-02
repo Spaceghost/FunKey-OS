@@ -1,0 +1,102 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || {
+    echo "missing $COMMON" >&2
+    exit 1
+}
+. "$COMMON"
+
+SENT_DIR=${FUNKEY_IROH_SENT_DIR:-$FUNKEY_IROH_OUTBOX/sent}
+FAILED_DIR=${FUNKEY_IROH_FAILED_DIR:-$FUNKEY_IROH_OUTBOX/failed}
+
+read_job()
+{
+    job=$1
+    IFS='	' read -r peer system game path expected_hash < "$job" || return 1
+    [ -n "$peer" ] && [ -n "$system" ] && [ -n "$game" ] &&
+        [ -n "$path" ] && [ -n "$expected_hash" ]
+}
+
+flush_one()
+{
+    iroh_ensure_state
+    mkdir -p "$SENT_DIR" "$FAILED_DIR"
+
+    job=
+    for candidate in "$FUNKEY_IROH_OUTBOX"/*.job; do
+        [ -f "$candidate" ] || continue
+        job=$candidate
+        break
+    done
+    [ -n "$job" ] || return 0
+
+    if ! read_job "$job"; then
+        mv "$job" "$FAILED_DIR/$(basename "$job").invalid" 2>/dev/null || rm -f "$job"
+        return 0
+    fi
+
+    if ! iroh_valid_name "$peer" || ! iroh_line_present "$peer" "$FUNKEY_IROH_SYNC_PEERS"; then
+        mv "$job" "$FAILED_DIR/$(basename "$job").unpaired" 2>/dev/null || rm -f "$job"
+        return 0
+    fi
+    if ! iroh_safe_path "$path" || [ ! -f "$path" ]; then
+        mv "$job" "$FAILED_DIR/$(basename "$job").missing" 2>/dev/null || rm -f "$job"
+        return 0
+    fi
+
+    current_hash=$(iroh_hash_file "$path") || return 75
+    if [ "$current_hash" != "$expected_hash" ]; then
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            "$peer" "$system" "$game" "$path" "$current_hash" |
+            iroh_atomic_write "$job" || return 75
+        return 75
+    fi
+
+    log="$job.last-error"
+    if "$FUNKEY_IROH_SERVICE" send "$peer" "$system" "$game" "$path" >"$log" 2>&1; then
+        iroh_write_baseline "$peer" "$system" "$game" "$path" "$current_hash" || :
+        destination="$SENT_DIR/$(basename "$job").$(date +%s 2>/dev/null || echo 0)"
+        mv "$job" "$destination" 2>/dev/null || rm -f "$job"
+        rm -f "$log"
+        return 0
+    fi
+
+    return 75
+}
+
+list_jobs()
+{
+    iroh_ensure_state
+    for job in "$FUNKEY_IROH_OUTBOX"/*.job; do
+        [ -f "$job" ] || continue
+        if read_job "$job"; then
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+                "$peer" "$system" "$game" "$path" "$expected_hash"
+        fi
+    done
+}
+
+case "${1:-}" in
+    flush-one)
+        flush_one
+        ;;
+    list)
+        list_jobs
+        ;;
+    count)
+        count=0
+        for job in "$FUNKEY_IROH_OUTBOX"/*.job; do
+            [ -f "$job" ] || continue
+            count=$((count + 1))
+        done
+        printf '%s\n' "$count"
+        ;;
+    *)
+        cat >&2 <<EOF
+Usage: $(basename "$0") {flush-one|list|count}
+EOF
+        exit 64
+        ;;
+esac

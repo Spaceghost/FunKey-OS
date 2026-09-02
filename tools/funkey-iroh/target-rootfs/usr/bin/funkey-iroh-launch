@@ -1,0 +1,176 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || {
+    echo "missing $COMMON" >&2
+    exit 1
+}
+. "$COMMON"
+
+UI=${FUNKEY_IROH_UI:-/usr/bin/funkey-iroh-ui}
+PROMPT_FILE=${FUNKEY_IROH_PROMPT_FILE:-$FUNKEY_IROH_STATE_DIR/launch-prompt}
+ACTION_FILE=${FUNKEY_IROH_ACTION_FILE:-$FUNKEY_IROH_RUNTIME_DIR/launch.action}
+SESSION_FILE=${FUNKEY_IROH_SESSION_FILE:-$FUNKEY_IROH_RUNTIME_DIR/session}
+SESSION_LOG=${FUNKEY_IROH_SESSION_LOG:-$FUNKEY_IROH_STATE_DIR/netplay.log}
+
+system=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --system)
+            [ "$#" -ge 2 ] || iroh_die 64 "--system requires a value"
+            system=$2
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            iroh_die 64 "usage: $(basename "$0") --system SYSTEM -- COMMAND [ARG...]"
+            ;;
+    esac
+done
+
+[ -n "$system" ] || iroh_die 64 "missing --system"
+[ "$#" -gt 0 ] || iroh_die 64 "missing emulator command"
+system=$(iroh_sanitize "$system")
+command=$1
+
+rom=
+for argument in "$@"; do
+    rom=$argument
+done
+case "$rom" in
+    /mnt/*) ;;
+    *) rom= ;;
+esac
+
+if [ -n "$rom" ]; then
+    game_name=$(basename "$rom")
+    game_name=${game_name%.*}
+else
+    game_name=$(basename "$command")
+fi
+game=$(iroh_sanitize "$game_name")
+
+iroh_ensure_state
+rm -f "$ACTION_FILE"
+
+adapter_available=0
+if "$FUNKEY_IROH_SESSION" adapter "$system" >/dev/null 2>&1; then
+    adapter_available=1
+fi
+
+if [ -x "$UI" ] && { [ -e "$PROMPT_FILE" ] || [ "$adapter_available" -eq 1 ]; }; then
+    "$UI" --launch "$system" "$game_name" "${rom:-}"
+    ui_status=$?
+    if [ "$ui_status" -ne 0 ]; then
+        exit "$ui_status"
+    fi
+fi
+
+action=solo
+peer=
+if [ -r "$ACTION_FILE" ]; then
+    IFS='	' read -r action peer < "$ACTION_FILE" || action=solo
+fi
+rm -f "$ACTION_FILE"
+
+netplay_pid=
+stop_netplay()
+{
+    if [ -n "$netplay_pid" ] && kill -0 "$netplay_pid" 2>/dev/null; then
+        kill "$netplay_pid" 2>/dev/null || :
+        wait "$netplay_pid" 2>/dev/null || :
+    fi
+    rm -f "$SESSION_FILE"
+}
+trap 'stop_netplay' INT TERM HUP
+
+start_netplay()
+{
+    adapter_line=$("$FUNKEY_IROH_SESSION" adapter "$system") || return 1
+    IFS='	' read -r adapter_system bind_address target_address adapter_label <<EOF
+$adapter_line
+EOF
+    [ -n "$bind_address" ] && [ -n "$target_address" ] || return 1
+
+    mkdir -p "$(dirname "$SESSION_LOG")" "$FUNKEY_IROH_RUNTIME_DIR"
+    : > "$SESSION_LOG"
+
+    case "$action" in
+        host)
+            "$FUNKEY_IROH_SERVICE" netplay host \
+                "$bind_address" "$target_address" >>"$SESSION_LOG" 2>&1 &
+            ;;
+        join)
+            iroh_valid_name "$peer" || return 1
+            "$FUNKEY_IROH_SERVICE" netplay join \
+                "$peer" "$bind_address" "$target_address" >>"$SESSION_LOG" 2>&1 &
+            ;;
+        *) return 0 ;;
+    esac
+    netplay_pid=$!
+
+    sleep 1
+    if ! kill -0 "$netplay_pid" 2>/dev/null; then
+        wait "$netplay_pid" 2>/dev/null || :
+        netplay_pid=
+        iroh_notify 5 " IROH NETPLAY FAILED^       CHECK LOGS"
+        return 1
+    fi
+
+    temporary="${SESSION_FILE}.tmp.$$"
+    {
+        printf 'state=connected\n'
+        printf 'mode=%s\n' "$action"
+        printf 'peer=%s\n' "${peer:-waiting}"
+        printf 'system=%s\n' "$system"
+        printf 'game=%s\n' "$game"
+        printf 'adapter=%s\n' "$adapter_label"
+        printf 'bind=%s\n' "$bind_address"
+        printf 'target=%s\n' "$target_address"
+        printf 'pid=%s\n' "$netplay_pid"
+        printf 'started=%s\n' "$(date +%s 2>/dev/null || echo 0)"
+    } > "$temporary" &&
+        mv "$temporary" "$SESSION_FILE"
+    return 0
+}
+
+case "$action" in
+    solo) ;;
+    host|join)
+        if [ "$adapter_available" -ne 1 ] || ! start_netplay; then
+            [ -x "$UI" ] && "$UI" --message \
+                "Multiplayer unavailable" \
+                "This emulator does not have a working Iroh adapter, or the session could not start."
+            exit 3
+        fi
+        ;;
+    cancel)
+        exit 2
+        ;;
+    *)
+        iroh_warn "ignoring unknown launch action: $action"
+        action=solo
+        ;;
+esac
+
+marker="$FUNKEY_IROH_RUNTIME_DIR/game-start.$$"
+now=$(date +%s 2>/dev/null || echo 0)
+old=$((now - 5))
+touch -d "@$old" "$marker" 2>/dev/null || touch "$marker"
+
+"$@"
+game_status=$?
+
+stop_netplay
+trap - INT TERM HUP
+
+sync
+/usr/bin/funkey-iroh-postgame "$system" "$game" "${rom:-}" "$marker" \
+    >>"$FUNKEY_IROH_STATE_DIR/postgame.log" 2>&1 || :
+rm -f "$marker"
+
+exit "$game_status"

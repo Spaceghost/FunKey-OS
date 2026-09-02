@@ -1,0 +1,106 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || {
+    echo "missing $COMMON" >&2
+    exit 1
+}
+. "$COMMON"
+
+system_raw=${1:-}
+game_raw=${2:-}
+rom=${3:-}
+marker=${4:-}
+
+[ -n "$system_raw" ] && [ -n "$game_raw" ] && [ -n "$marker" ] ||
+    iroh_die 64 "usage: $(basename "$0") SYSTEM GAME ROM START_MARKER"
+[ -e "$marker" ] || iroh_die 64 "start marker is missing: $marker"
+
+system=$(iroh_sanitize "$system_raw")
+game=$(iroh_sanitize "$game_raw")
+[ -n "$system" ] && [ -n "$game" ] || iroh_die 64 "invalid game identity"
+
+iroh_ensure_state
+candidates="$FUNKEY_IROH_RUNTIME_DIR/postgame-candidates.$$"
+roots="$FUNKEY_IROH_RUNTIME_DIR/postgame-roots.$$"
+trap 'rm -f "$candidates" "$roots"' EXIT INT TERM
+
+: > "$candidates"
+: > "$roots"
+
+add_root()
+{
+    root=$1
+    [ -d "$root" ] || return 0
+    canonical=$(readlink -f "$root" 2>/dev/null) || return 0
+    case "$canonical" in
+        "$FUNKEY_IROH_STATE_DIR"|"$FUNKEY_IROH_STATE_DIR"/*) return 0 ;;
+    esac
+    grep -Fxq "$canonical" "$roots" 2>/dev/null ||
+        printf '%s\n' "$canonical" >> "$roots"
+}
+
+if [ -n "$rom" ]; then
+    add_root "$(dirname "$rom")"
+fi
+add_root /mnt/Saves
+add_root /mnt/saves
+add_root /mnt/Save
+add_root /mnt/save
+add_root /mnt/FunKey/.picoarch
+add_root /mnt/FunKey/.gmenu2x
+add_root /mnt/FunKey/.retrofe
+
+while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    find "$root" -type f -newer "$marker" \
+        \( -iname '*.sav' -o -iname '*.srm' -o -iname '*.rtc' \
+        -o -iname '*.state' -o -iname '*.st0' -o -iname '*.st1' \
+        -o -iname '*.st2' -o -iname '*.st3' -o -iname '*.st4' \
+        -o -iname '*.st5' -o -iname '*.st6' -o -iname '*.st7' \
+        -o -iname '*.st8' -o -iname '*.st9' -o -iname '*.eep' \
+        -o -iname '*.fla' -o -iname '*.mpk' -o -iname '*.nv' \
+        -o -iname '*.ram' \) -print 2>/dev/null >> "$candidates"
+done < "$roots"
+
+sort -u "$candidates" -o "$candidates" 2>/dev/null || :
+
+queued=0
+registered=0
+while IFS= read -r save; do
+    [ -f "$save" ] || continue
+    iroh_safe_path "$save" || continue
+    case "$save" in
+        "$FUNKEY_IROH_STATE_DIR"/*) continue ;;
+    esac
+
+    registry="$FUNKEY_IROH_GAME_DB/$system/$game/targets"
+    mkdir -p "$(dirname "$registry")"
+    iroh_add_line "$save" "$registry"
+    registered=$((registered + 1))
+
+    hash=$(iroh_hash_file "$save") || continue
+    [ -r "$FUNKEY_IROH_SYNC_PEERS" ] || continue
+
+    while IFS= read -r peer; do
+        [ -n "$peer" ] || continue
+        iroh_valid_name "$peer" || continue
+        iroh_peer_exists "$peer" || continue
+
+        basename_safe=$(iroh_sanitize "$(basename "$save")")
+        hash_prefix=$(printf '%s' "$hash" | cut -c1-16)
+        job="$FUNKEY_IROH_OUTBOX/${peer}-${system}-${game}-${basename_safe}-${hash_prefix}.job"
+        if [ ! -e "$job" ]; then
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+                "$peer" "$system" "$game" "$save" "$hash" |
+                iroh_atomic_write "$job" || continue
+            queued=$((queued + 1))
+        fi
+    done < "$FUNKEY_IROH_SYNC_PEERS"
+done < "$candidates"
+
+if [ "$queued" -gt 0 ]; then
+    iroh_notify 2 " SAVE SYNC QUEUED^      $queued FILE(S)"
+fi
+printf 'registered=%s queued=%s\n' "$registered" "$queued"

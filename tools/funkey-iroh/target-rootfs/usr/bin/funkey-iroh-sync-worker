@@ -1,0 +1,25 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || exit 1
+. "$COMMON"
+
+POLL_SECONDS=${FUNKEY_IROH_SYNC_POLL_SECONDS:-10}
+RETRY_SECONDS=${FUNKEY_IROH_SYNC_RETRY_SECONDS:-60}
+ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
+
+trap 'exit 0' INT TERM
+
+while :; do
+    delay=$POLL_SECONDS
+    if [ -e "$ENABLE_FILE" ] && iroh_data_is_mounted &&
+       [ ! -e "$FUNKEY_IROH_EXCLUSIVE" ] &&
+       [ ! -d "$FUNKEY_IROH_ENDPOINT_LOCK" ]; then
+        /usr/bin/funkey-iroh-inbox auto >/dev/null 2>&1 || :
+        /usr/bin/funkey-iroh-outbox flush-one >/dev/null 2>&1
+        status=$?
+        [ "$status" -eq 75 ] && delay=$RETRY_SECONDS
+    fi
+    sleep "$delay"
+done
