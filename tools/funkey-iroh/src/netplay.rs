@@ -22,6 +22,15 @@ use crate::{
 const UDP_BUFFER_BYTES: usize = 65_535;
 const LOG_DROP_MASK: u64 = 0x3f;
 
+fn current_rtt(connection: &Connection) -> Option<Duration> {
+    let paths = connection.paths();
+    let selected = paths
+        .iter()
+        .find(|path| path.is_selected())
+        .map(|path| path.rtt());
+    selected.or_else(|| paths.iter().map(|path| path.rtt()).min())
+}
+
 pub async fn host(
     paths: Paths,
     bind_address: SocketAddr,
@@ -64,10 +73,16 @@ pub async fn host(
                     continue;
                 }
 
-                eprintln!(
-                    "funkey-iroh: netplay peer {remote_id} connected; RTT={}ms",
-                    connection.rtt().as_millis()
-                );
+                if let Some(rtt) = current_rtt(&connection) {
+                    eprintln!(
+                        "funkey-iroh: netplay peer {remote_id} connected; RTT={}ms",
+                        rtt.as_millis()
+                    );
+                } else {
+                    eprintln!(
+                        "funkey-iroh: netplay peer {remote_id} connected; RTT unavailable"
+                    );
+                }
                 bridge(connection, bind_address, target_address).await?;
                 break;
             }
@@ -100,12 +115,20 @@ pub async fn join(
         .await
         .with_context(|| format!("connect to netplay peer {remote_id}"))?;
 
-    eprintln!(
-        "funkey-iroh: connected to netplay peer {remote_id}; RTT={}ms; local UDP {} -> {}",
-        connection.rtt().as_millis(),
-        bind_address,
-        target_address
-    );
+    if let Some(rtt) = current_rtt(&connection) {
+        eprintln!(
+            "funkey-iroh: connected to netplay peer {remote_id}; RTT={}ms; local UDP {} -> {}",
+            rtt.as_millis(),
+            bind_address,
+            target_address
+        );
+    } else {
+        eprintln!(
+            "funkey-iroh: connected to netplay peer {remote_id}; RTT unavailable; local UDP {} -> {}",
+            bind_address,
+            target_address
+        );
+    }
     bridge(connection, bind_address, target_address).await?;
     endpoint.close().await;
     Ok(())
