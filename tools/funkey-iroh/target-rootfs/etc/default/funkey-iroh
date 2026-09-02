@@ -1,6 +1,17 @@
 # Persistent state lives on the writable data partition.
 FUNKEY_IROH_STATE_DIR=/mnt/.funkey-iroh
 FUNKEY_IROH_INBOX=/mnt/.funkey-iroh/inbox
+FUNKEY_IROH_PUBLIC_DIR=/mnt/FunKey/Iroh
+
+# Transfer and connection bounds.
 FUNKEY_IROH_MAX_SAVE_BYTES=67108864
 FUNKEY_IROH_ONLINE_TIMEOUT=8
 FUNKEY_IROH_SERVICE_ARGS=serve
+
+# Background post-game outbox and safe inbox processing.
+FUNKEY_IROH_SYNC_POLL_SECONDS=10
+FUNKEY_IROH_SYNC_RETRY_SECONDS=60
+
+# Firmware-provided and user-provided multiplayer adapter registries.
+FUNKEY_IROH_SYSTEM_ADAPTERS=/etc/funkey-iroh/adapters.tsv
+FUNKEY_IROH_USER_ADAPTERS=/mnt/.funkey-iroh/adapters.tsv

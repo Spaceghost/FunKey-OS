@@ -1,0 +1,119 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || {
+    echo "missing $COMMON" >&2
+    exit 1
+}
+. "$COMMON"
+
+AUTO_FILE=${FUNKEY_IROH_AUTO_FILE:-$FUNKEY_IROH_STATE_DIR/auto-apply}
+PROMPT_FILE=${FUNKEY_IROH_PROMPT_FILE:-$FUNKEY_IROH_STATE_DIR/launch-prompt}
+
+list_peers()
+{
+    iroh_ensure_state
+    "$FUNKEY_IROH_DAEMON" peer list 2>/dev/null |
+    while IFS='	' read -r name endpoint_id ticket; do
+        [ -n "$name" ] || continue
+        if iroh_line_present "$name" "$FUNKEY_IROH_SYNC_PEERS"; then
+            enabled=1
+        else
+            enabled=0
+        fi
+        printf '%s\t%s\t%s\n' "$enabled" "$name" "$endpoint_id"
+    done
+}
+
+set_peer()
+{
+    action=$1
+    name=${2:-}
+    iroh_valid_name "$name" || iroh_die 64 "invalid peer name"
+    iroh_peer_exists "$name" || iroh_die 2 "peer $name is not paired"
+    iroh_ensure_state
+
+    case "$action" in
+        enable) iroh_add_line "$name" "$FUNKEY_IROH_SYNC_PEERS" ;;
+        disable) iroh_remove_line "$name" "$FUNKEY_IROH_SYNC_PEERS" ;;
+        toggle)
+            if iroh_line_present "$name" "$FUNKEY_IROH_SYNC_PEERS"; then
+                iroh_remove_line "$name" "$FUNKEY_IROH_SYNC_PEERS"
+                action=disable
+            else
+                iroh_add_line "$name" "$FUNKEY_IROH_SYNC_PEERS"
+                action=enable
+            fi
+            ;;
+    esac
+    printf '%s\t%s\n' "$action" "$name"
+}
+
+marker_command()
+{
+    marker=$1
+    action=${2:-status}
+    iroh_ensure_state
+    case "$action" in
+        status)
+            if [ -e "$marker" ]; then
+                printf '%s\n' enabled
+                return 0
+            fi
+            printf '%s\n' disabled
+            return 1
+            ;;
+        enable)
+            : > "$marker"
+            printf '%s\n' enabled
+            ;;
+        disable)
+            rm -f "$marker"
+            printf '%s\n' disabled
+            ;;
+        toggle)
+            if [ -e "$marker" ]; then
+                rm -f "$marker"
+                printf '%s\n' disabled
+            else
+                : > "$marker"
+                printf '%s\n' enabled
+            fi
+            ;;
+        *) iroh_die 64 "expected status, enable, disable, or toggle" ;;
+    esac
+}
+
+case "${1:-}" in
+    list)
+        list_peers
+        ;;
+    enable|disable|toggle)
+        action=$1
+        shift
+        set_peer "$action" "${1:-}"
+        ;;
+    auto)
+        shift
+        marker_command "$AUTO_FILE" "${1:-status}"
+        ;;
+    prompt)
+        shift
+        marker_command "$PROMPT_FILE" "${1:-status}"
+        ;;
+    *)
+        cat >&2 <<EOF
+Usage: $(basename "$0") COMMAND
+
+Commands:
+  list
+  enable PEER
+  disable PEER
+  toggle PEER
+  auto status|enable|disable|toggle
+  prompt status|enable|disable|toggle
+EOF
+        exit 64
+        ;;
+esac

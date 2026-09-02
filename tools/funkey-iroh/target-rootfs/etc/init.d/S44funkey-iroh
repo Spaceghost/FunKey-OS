@@ -11,8 +11,12 @@ FUNKEY_IROH_INBOX=${FUNKEY_IROH_INBOX:-$FUNKEY_IROH_STATE_DIR/inbox}
 FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
 FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
 FUNKEY_IROH_SERVICE_ARGS=${FUNKEY_IROH_SERVICE_ARGS:-serve}
+FUNKEY_IROH_RUNTIME_DIR=${FUNKEY_IROH_RUNTIME_DIR:-/var/run/funkey-iroh}
+FUNKEY_IROH_EXCLUSIVE=${FUNKEY_IROH_EXCLUSIVE:-$FUNKEY_IROH_RUNTIME_DIR/exclusive}
 ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
 LOG_FILE=$FUNKEY_IROH_STATE_DIR/service.log
+UI_OPK_SOURCE=${FUNKEY_IROH_UI_OPK_SOURCE:-/usr/local/share/OPKs/Settings/iroh_funkey-s.opk}
+UI_OPK_TARGET=${FUNKEY_IROH_UI_OPK_TARGET:-/mnt/Settings/iroh_funkey-s.opk}
 
 export FUNKEY_IROH_STATE_DIR
 export FUNKEY_IROH_INBOX
@@ -34,8 +38,38 @@ data_is_mounted()
     grep -q '[[:space:]]/mnt[[:space:]]' /proc/mounts 2>/dev/null
 }
 
+install_one_opk()
+{
+    source=$1
+    target=$2
+    [ -r "$source" ] || return 0
+    mkdir -p "$(dirname "$target")"
+    if [ -r "$target" ] && cmp -s "$source" "$target"; then
+        return 0
+    fi
+    temporary="${target}.tmp.$$"
+    cp "$source" "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    sync "$temporary" 2>/dev/null || sync
+    mv "$temporary" "$target"
+}
+
+install_ui()
+{
+    data_is_mounted || return 0
+    install_one_opk "$UI_OPK_SOURCE" "$UI_OPK_TARGET" || return 1
+    for source in /usr/local/share/OPKs/Libretro/*_picoarch_funkey-s.opk; do
+        [ -r "$source" ] || continue
+        install_one_opk "$source" "/mnt/Libretro/$(basename "$source")" || return 1
+    done
+}
+
 start_service()
 {
+    install_ui || echo "funkey-iroh: could not install launcher UI" >&2
+
     if [ ! -x "$DAEMON" ]; then
         echo "funkey-iroh: missing $DAEMON" >&2
         return 1
@@ -48,12 +82,16 @@ start_service()
         echo "funkey-iroh: /mnt is not mounted" >&2
         return 1
     fi
+    if [ -e "$FUNKEY_IROH_EXCLUSIVE" ]; then
+        echo "funkey-iroh: endpoint reserved by foreground command"
+        return 0
+    fi
     if is_running; then
         echo "funkey-iroh: already running ($pid)"
         return 0
     fi
 
-    mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX"
+    mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX" "$FUNKEY_IROH_RUNTIME_DIR"
     touch "$LOG_FILE"
     rm -f "$PIDFILE"
     echo "funkey-iroh: starting"
@@ -91,8 +129,11 @@ case "${1:-}" in
         echo "funkey-iroh: stopped"
         exit 1
         ;;
+    install-ui)
+        install_ui
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status}" >&2
+        echo "Usage: $0 {start|stop|restart|status|install-ui}" >&2
         exit 64
         ;;
 esac

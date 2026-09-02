@@ -1,0 +1,101 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || {
+    echo "missing $COMMON" >&2
+    exit 1
+}
+. "$COMMON"
+
+SYSTEM_ADAPTERS=${FUNKEY_IROH_SYSTEM_ADAPTERS:-/etc/funkey-iroh/adapters.tsv}
+USER_ADAPTERS=${FUNKEY_IROH_USER_ADAPTERS:-$FUNKEY_IROH_STATE_DIR/adapters.tsv}
+SESSION_FILE=${FUNKEY_IROH_SESSION_FILE:-$FUNKEY_IROH_RUNTIME_DIR/session}
+SESSION_LOG=${FUNKEY_IROH_SESSION_LOG:-$FUNKEY_IROH_STATE_DIR/netplay.log}
+
+list_file()
+{
+    file=$1
+    [ -r "$file" ] || return 0
+    awk -F '\t' '
+        /^[[:space:]]*#/ { next }
+        NF >= 4 && $1 ~ /^[A-Za-z0-9._-]+$/ { print }
+    ' "$file"
+}
+
+list_adapters()
+{
+    {
+        list_file "$USER_ADAPTERS"
+        list_file "$SYSTEM_ADAPTERS"
+    } | awk -F '\t' '!seen[$1]++'
+}
+
+adapter()
+{
+    wanted=${1:-}
+    iroh_valid_name "$wanted" || iroh_die 64 "invalid system identifier"
+    list_adapters |
+        awk -F '\t' -v wanted="$wanted" '$1 == wanted { print; found=1; exit } END { exit !found }'
+}
+
+status()
+{
+    if [ -r "$SESSION_FILE" ]; then
+        cat "$SESSION_FILE"
+    else
+        printf '%s\n' 'state=idle'
+    fi
+    if [ -r "$SESSION_LOG" ]; then
+        printf '%s\n' '-- log --'
+        tail -n 12 "$SESSION_LOG"
+    fi
+}
+
+stop_session()
+{
+    [ -r "$SESSION_FILE" ] || return 0
+    pid=$(sed -n 's/^pid=//p' "$SESSION_FILE" | sed -n '1p')
+    case "$pid" in
+        ''|*[!0-9]*) ;;
+        *)
+            if kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" 2>/dev/null || :
+                wait_seconds=0
+                while kill -0 "$pid" 2>/dev/null && [ "$wait_seconds" -lt 5 ]; do
+                    sleep 1
+                    wait_seconds=$((wait_seconds + 1))
+                done
+                kill -9 "$pid" 2>/dev/null || :
+            fi
+            ;;
+    esac
+    rm -f "$SESSION_FILE"
+}
+
+case "${1:-}" in
+    list)
+        list_adapters
+        ;;
+    adapter)
+        shift
+        adapter "${1:-}"
+        ;;
+    status)
+        status
+        ;;
+    stop)
+        stop_session
+        ;;
+    *)
+        cat >&2 <<EOF
+Usage: $(basename "$0") {list|adapter SYSTEM|status|stop}
+
+Adapter TSV columns:
+  SYSTEM    LOCAL_BIND    EMULATOR_TARGET    LABEL
+
+User adapters in $USER_ADAPTERS override firmware defaults.
+EOF
+        exit 64
+        ;;
+esac

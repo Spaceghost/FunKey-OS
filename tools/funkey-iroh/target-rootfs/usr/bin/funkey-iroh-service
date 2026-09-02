@@ -1,34 +1,108 @@
 #!/bin/sh
 set -u
 
-DAEMON=/usr/bin/funkey-iroh
-INIT=/etc/init.d/S44funkey-iroh
-CONFIG=/etc/default/funkey-iroh
+DAEMON=${FUNKEY_IROH_DAEMON:-/usr/bin/funkey-iroh}
+INIT=${FUNKEY_IROH_INIT:-/etc/init.d/S44funkey-iroh}
+SYNC_INIT=${FUNKEY_IROH_SYNC_INIT:-/etc/init.d/S45funkey-iroh-sync}
+CONFIG=${FUNKEY_IROH_CONFIG:-/etc/default/funkey-iroh}
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
 
 [ -r "$CONFIG" ] && . "$CONFIG"
+[ -r "$COMMON" ] && . "$COMMON"
+
 FUNKEY_IROH_STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
 FUNKEY_IROH_INBOX=${FUNKEY_IROH_INBOX:-$FUNKEY_IROH_STATE_DIR/inbox}
+FUNKEY_IROH_RUNTIME_DIR=${FUNKEY_IROH_RUNTIME_DIR:-/var/run/funkey-iroh}
+FUNKEY_IROH_ENDPOINT_LOCK=${FUNKEY_IROH_ENDPOINT_LOCK:-/var/lock/funkey-iroh-endpoint.lock}
+FUNKEY_IROH_EXCLUSIVE=${FUNKEY_IROH_EXCLUSIVE:-$FUNKEY_IROH_RUNTIME_DIR/exclusive}
 ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
 TICKET_FILE=$FUNKEY_IROH_STATE_DIR/current-ticket
 LOG_FILE=$FUNKEY_IROH_STATE_DIR/service.log
 USB_NETWORK_MARKER=/mnt/usbnet
+PROMPT_FILE=$FUNKEY_IROH_STATE_DIR/launch-prompt
+UI_INITIALIZED=$FUNKEY_IROH_STATE_DIR/ui-initialized
+UI_OPK_SOURCE=${FUNKEY_IROH_UI_OPK_SOURCE:-/usr/local/share/OPKs/Settings/iroh_funkey-s.opk}
+UI_OPK_TARGET=${FUNKEY_IROH_UI_OPK_TARGET:-/mnt/Settings/iroh_funkey-s.opk}
 
 export FUNKEY_IROH_STATE_DIR
 export FUNKEY_IROH_INBOX
 export FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
 export FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
 
+install_one_opk()
+{
+    source=$1
+    target=$2
+    [ -r "$source" ] || return 0
+    mkdir -p "$(dirname "$target")"
+    if [ -r "$target" ] && cmp -s "$source" "$target"; then
+        return 0
+    fi
+    temporary="${target}.tmp.$$"
+    cp "$source" "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    sync "$temporary" 2>/dev/null || sync
+    mv "$temporary" "$target"
+}
+
+install_ui()
+{
+    grep -q '[[:space:]]/mnt[[:space:]]' /proc/mounts 2>/dev/null || return 0
+
+    install_one_opk "$UI_OPK_SOURCE" "$UI_OPK_TARGET" || return 1
+    for source in /usr/local/share/OPKs/Libretro/*_picoarch_funkey-s.opk; do
+        [ -r "$source" ] || continue
+        install_one_opk "$source" "/mnt/Libretro/$(basename "$source")" || return 1
+    done
+}
+
+acquire_endpoint_lock()
+{
+    mkdir -p "$(dirname "$FUNKEY_IROH_ENDPOINT_LOCK")" "$FUNKEY_IROH_RUNTIME_DIR"
+    attempts=0
+    while ! mkdir "$FUNKEY_IROH_ENDPOINT_LOCK" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 30 ]; then
+            echo "funkey-iroh-service: endpoint is busy" >&2
+            return 75
+        fi
+        sleep 1
+    done
+    : > "$FUNKEY_IROH_EXCLUSIVE"
+}
+
+release_endpoint_lock()
+{
+    rm -f "$FUNKEY_IROH_EXCLUSIVE"
+    rmdir "$FUNKEY_IROH_ENDPOINT_LOCK" 2>/dev/null || :
+}
+
 with_endpoint()
 {
+    acquire_endpoint_lock || return $?
     was_running=0
     if "$INIT" status >/dev/null 2>&1; then
         was_running=1
-        "$INIT" stop || return $?
+        "$INIT" stop || {
+            status=$?
+            release_endpoint_lock
+            return "$status"
+        }
     fi
 
-    "$DAEMON" "$@"
+    interrupted=0
+    endpoint_pid=
+    "$DAEMON" "$@" &
+    endpoint_pid=$!
+    trap 'interrupted=1; kill -TERM "$endpoint_pid" 2>/dev/null || :' INT TERM HUP
+    wait "$endpoint_pid"
     command_status=$?
+    trap - INT TERM HUP
+    endpoint_pid=
 
+    release_endpoint_lock
     if [ "$was_running" -eq 1 ]; then
         "$INIT" start || {
             restart_status=$?
@@ -36,25 +110,67 @@ with_endpoint()
             return "$restart_status"
         }
     fi
+    [ "$interrupted" -eq 0 ] || return 130
     return "$command_status"
+}
+
+enable_service()
+{
+    mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX"
+    : > "$ENABLE_FILE"
+
+    if [ ! -e "$UI_INITIALIZED" ]; then
+        : > "$PROMPT_FILE"
+        : > "$UI_INITIALIZED"
+    fi
+
+    if [ ! -e "$USB_NETWORK_MARKER" ]; then
+        : > "$USB_NETWORK_MARKER"
+        echo "funkey-iroh-service: enabled persistent USB networking; reconnect or reboot if usb0 is not present" >&2
+    fi
+
+    install_ui || echo "funkey-iroh-service: could not install launcher UI OPK" >&2
+    "$INIT" start || return $?
+    [ -x "$SYNC_INIT" ] && "$SYNC_INIT" start || :
+}
+
+disable_service()
+{
+    [ -x "$SYNC_INIT" ] && "$SYNC_INIT" stop || :
+    "$INIT" stop || return $?
+    rm -f "$ENABLE_FILE"
 }
 
 case "${1:-}" in
     enable)
-        mkdir -p "$FUNKEY_IROH_STATE_DIR" "$FUNKEY_IROH_INBOX"
-        : > "$ENABLE_FILE"
-        if [ ! -e "$USB_NETWORK_MARKER" ]; then
-            : > "$USB_NETWORK_MARKER"
-            echo "funkey-iroh-service: enabled persistent USB networking; reconnect or reboot if usb0 is not present" >&2
-        fi
-        "$INIT" start
+        enable_service
         ;;
     disable)
-        "$INIT" stop || exit $?
-        rm -f "$ENABLE_FILE"
+        disable_service
         ;;
-    start|stop|restart|status)
-        exec "$INIT" "$1"
+    start)
+        "$INIT" start
+        [ -x "$SYNC_INIT" ] && "$SYNC_INIT" start || :
+        ;;
+    stop)
+        [ -x "$SYNC_INIT" ] && "$SYNC_INIT" stop || :
+        exec "$INIT" stop
+        ;;
+    restart)
+        [ -x "$SYNC_INIT" ] && "$SYNC_INIT" stop || :
+        "$INIT" restart || exit $?
+        [ -x "$SYNC_INIT" ] && "$SYNC_INIT" start || :
+        ;;
+    status)
+        receiver_status=0
+        "$INIT" status || receiver_status=$?
+        if [ -x "$SYNC_INIT" ]; then
+            "$SYNC_INIT" status || :
+        fi
+        exit "$receiver_status"
+        ;;
+    install-ui)
+        install_ui
         ;;
     ticket)
         if [ -s "$TICKET_FILE" ]; then
@@ -83,6 +199,26 @@ case "${1:-}" in
         }
         with_endpoint "$@"
         ;;
+    pairing)
+        shift
+        exec /usr/bin/funkey-iroh-pairing "$@"
+        ;;
+    sync)
+        shift
+        exec /usr/bin/funkey-iroh-sync-peer "$@"
+        ;;
+    inbox)
+        shift
+        exec /usr/bin/funkey-iroh-inbox "$@"
+        ;;
+    session)
+        shift
+        exec /usr/bin/funkey-iroh-session "$@"
+        ;;
+    ui)
+        shift
+        exec /usr/bin/funkey-iroh-ui "$@"
+        ;;
     logs)
         lines=${2:-100}
         case "$lines" in
@@ -90,24 +226,24 @@ case "${1:-}" in
         esac
         tail -n "$lines" "$LOG_FILE"
         ;;
-    inbox)
-        find "$FUNKEY_IROH_INBOX" -maxdepth 5 -type f 2>/dev/null | sort
-        ;;
     *)
         cat >&2 <<EOF
 Usage: $0 COMMAND [ARGS]
 
 Commands:
-  enable                         Enable and start the paired save receiver
-  disable                        Stop and disable the receiver
-  start|stop|restart|status      Control the receiver
+  enable|disable                 Enable or disable receiver and sync worker
+  start|stop|restart|status      Control both services
+  install-ui                     Install/update the Settings launcher OPK
   ticket                         Print the current pairing ticket
   peer add|list|remove ...       Manage paired endpoint identities
+  pairing export|import ...      Exchange USB-friendly pairing cards
+  sync list|toggle ...           Configure automatic post-game save peers
+  inbox list|install|archive     Review received saves safely
+  session list|status|stop       Inspect multiplayer adapters and session
   send PEER SYSTEM GAME FILE     Send a save, pausing the receiver safely
   netplay host|join ...          Run a UDP tunnel, pausing the receiver safely
-  run ARGS...                    Run another endpoint command safely
+  ui [ARGS...]                   Open the on-device Iroh UI
   logs [LINES]                   Show receiver logs
-  inbox                          List received save files
 EOF
         exit 64
         ;;

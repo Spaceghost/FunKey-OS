@@ -1,0 +1,57 @@
+#!/bin/sh
+
+DAEMON=/usr/bin/funkey-iroh-sync-worker
+PIDFILE=/var/run/funkey-iroh-sync.pid
+CONFIG=/etc/default/funkey-iroh
+[ -r "$CONFIG" ] && . "$CONFIG"
+FUNKEY_IROH_STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
+
+is_running()
+{
+    [ -r "$PIDFILE" ] || return 1
+    IFS= read -r pid < "$PIDFILE" || return 1
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+case "${1:-}" in
+    start)
+        [ -e "$ENABLE_FILE" ] || {
+            echo "funkey-iroh-sync: disabled"
+            exit 0
+        }
+        if is_running; then
+            echo "funkey-iroh-sync: already running ($pid)"
+            exit 0
+        fi
+        rm -f "$PIDFILE"
+        start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON"
+        echo "funkey-iroh-sync: started"
+        ;;
+    stop)
+        if is_running; then
+            start-stop-daemon -K -q -p "$PIDFILE" -o || exit 1
+        fi
+        rm -f "$PIDFILE"
+        echo "funkey-iroh-sync: stopped"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    status)
+        if is_running; then
+            echo "funkey-iroh-sync: running ($pid)"
+            exit 0
+        fi
+        echo "funkey-iroh-sync: stopped"
+        exit 1
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 64
+        ;;
+esac
