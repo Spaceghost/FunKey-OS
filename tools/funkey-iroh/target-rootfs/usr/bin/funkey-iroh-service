@@ -25,6 +25,8 @@ export FUNKEY_IROH_LIBRARY
 export FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
 export FUNKEY_IROH_MAX_BUNDLE_BYTES=${FUNKEY_IROH_MAX_BUNDLE_BYTES:-17179869184}
 export FUNKEY_IROH_MAX_BUNDLE_FILES=${FUNKEY_IROH_MAX_BUNDLE_FILES:-4096}
+export FUNKEY_IROH_MAX_INCOMING_CONNECTIONS=${FUNKEY_IROH_MAX_INCOMING_CONNECTIONS:-4}
+export FUNKEY_IROH_HANDSHAKE_TIMEOUT=${FUNKEY_IROH_HANDSHAKE_TIMEOUT:-15}
 export FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
 
 release_endpoint_lock()
@@ -94,6 +96,25 @@ with_endpoint()
     return "$command_status"
 }
 
+print_running_ticket()
+{
+    attempts=0
+    while [ ! -s "$TICKET_FILE" ]; do
+        if ! "$INIT" status >/dev/null 2>&1; then
+            echo "funkey-iroh-service: receiver stopped before publishing a ticket" >&2
+            return 1
+        fi
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 15 ]; then
+            echo "funkey-iroh-service: receiver did not publish a fresh ticket" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    cat "$TICKET_FILE"
+    printf '\n'
+}
+
 case "${1:-}" in
     enable)
         mkdir -p \
@@ -116,9 +137,8 @@ case "${1:-}" in
         exec "$INIT" "$1"
         ;;
     ticket)
-        if [ -s "$TICKET_FILE" ]; then
-            cat "$TICKET_FILE"
-            printf '\n'
+        if "$INIT" status >/dev/null 2>&1; then
+            print_running_ticket
         else
             with_endpoint ticket
         fi

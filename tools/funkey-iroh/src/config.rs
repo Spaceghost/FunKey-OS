@@ -11,6 +11,8 @@ pub const DEFAULT_LIBRARY_DIR: &str = "/mnt/FunKey/Shared Games";
 pub const DEFAULT_MAX_SAVE_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_BUNDLE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub const DEFAULT_MAX_BUNDLE_FILES: u64 = 4096;
+pub const DEFAULT_MAX_INCOMING_CONNECTIONS: u64 = 4;
+pub const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 pub const DEFAULT_ONLINE_TIMEOUT_SECS: u64 = 8;
 
 #[derive(Clone, Debug)]
@@ -85,6 +87,24 @@ pub fn max_bundle_files() -> Result<u64> {
         "FUNKEY_IROH_MAX_BUNDLE_FILES",
         DEFAULT_MAX_BUNDLE_FILES,
     )
+}
+
+pub fn max_incoming_connections() -> Result<usize> {
+    let value = parse_u64_env(
+        "FUNKEY_IROH_MAX_INCOMING_CONNECTIONS",
+        DEFAULT_MAX_INCOMING_CONNECTIONS,
+    )?;
+    if value > 64 {
+        bail!("FUNKEY_IROH_MAX_INCOMING_CONNECTIONS must not exceed 64");
+    }
+    usize::try_from(value).context("convert incoming connection limit")
+}
+
+pub fn handshake_timeout() -> Result<Duration> {
+    Ok(Duration::from_secs(parse_u64_env(
+        "FUNKEY_IROH_HANDSHAKE_TIMEOUT",
+        DEFAULT_HANDSHAKE_TIMEOUT_SECS,
+    )?))
 }
 
 pub fn online_timeout() -> Result<Duration> {

@@ -13,9 +13,13 @@ FUNKEY_IROH_LIBRARY=${FUNKEY_IROH_LIBRARY:-/mnt/FunKey/Shared Games}
 FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
 FUNKEY_IROH_MAX_BUNDLE_BYTES=${FUNKEY_IROH_MAX_BUNDLE_BYTES:-17179869184}
 FUNKEY_IROH_MAX_BUNDLE_FILES=${FUNKEY_IROH_MAX_BUNDLE_FILES:-4096}
+FUNKEY_IROH_MAX_INCOMING_CONNECTIONS=${FUNKEY_IROH_MAX_INCOMING_CONNECTIONS:-4}
+FUNKEY_IROH_HANDSHAKE_TIMEOUT=${FUNKEY_IROH_HANDSHAKE_TIMEOUT:-15}
 FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
+FUNKEY_IROH_LOG_MAX_BYTES=${FUNKEY_IROH_LOG_MAX_BYTES:-1048576}
 FUNKEY_IROH_SERVICE_ARGS=${FUNKEY_IROH_SERVICE_ARGS:-serve}
 ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
+TICKET_FILE=$FUNKEY_IROH_STATE_DIR/current-ticket
 LOG_FILE=$FUNKEY_IROH_STATE_DIR/service.log
 
 export FUNKEY_IROH_STATE_DIR
@@ -25,6 +29,8 @@ export FUNKEY_IROH_LIBRARY
 export FUNKEY_IROH_MAX_SAVE_BYTES
 export FUNKEY_IROH_MAX_BUNDLE_BYTES
 export FUNKEY_IROH_MAX_BUNDLE_FILES
+export FUNKEY_IROH_MAX_INCOMING_CONNECTIONS
+export FUNKEY_IROH_HANDSHAKE_TIMEOUT
 export FUNKEY_IROH_ONLINE_TIMEOUT
 
 is_running()
@@ -40,6 +46,26 @@ is_running()
 data_is_mounted()
 {
     grep -q '[[:space:]]/mnt[[:space:]]' /proc/mounts 2>/dev/null
+}
+
+rotate_log()
+{
+    case "$FUNKEY_IROH_LOG_MAX_BYTES" in
+        ''|*[!0-9]*)
+            echo "funkey-iroh: invalid FUNKEY_IROH_LOG_MAX_BYTES=$FUNKEY_IROH_LOG_MAX_BYTES" >&2
+            return 1
+            ;;
+    esac
+    [ "$FUNKEY_IROH_LOG_MAX_BYTES" -gt 0 ] || return 0
+    [ -f "$LOG_FILE" ] || return 0
+    log_size=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]')
+    case "$log_size" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$log_size" -gt "$FUNKEY_IROH_LOG_MAX_BYTES" ]; then
+        rm -f "$LOG_FILE.1"
+        mv "$LOG_FILE" "$LOG_FILE.1"
+    fi
 }
 
 start_service()
@@ -66,8 +92,9 @@ start_service()
         "$FUNKEY_IROH_INBOX" \
         "$FUNKEY_IROH_BUNDLE_INBOX" \
         "$FUNKEY_IROH_LIBRARY"
+    rotate_log || return $?
     touch "$LOG_FILE"
-    rm -f "$PIDFILE"
+    rm -f "$PIDFILE" "$TICKET_FILE"
     echo "funkey-iroh: starting"
     # FUNKEY_IROH_SERVICE_ARGS is an administrator-owned shell word list.
     # shellcheck disable=SC2086
