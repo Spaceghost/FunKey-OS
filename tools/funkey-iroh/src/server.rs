@@ -1,5 +1,9 @@
 use std::{
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,18 +18,42 @@ use tokio::{
 
 use crate::{
     bundle,
-    config::{Paths, max_save_bytes, online_timeout},
+    config::{
+        Paths, handshake_timeout, max_incoming_connections, max_save_bytes,
+        online_timeout,
+    },
     endpoint,
     identity,
     peers::PeerBook,
     save::{hash_file, sanitize_component},
-    wire::{
-        BUNDLE_ALPN, SAVE_ALPN, read_header, write_status,
-    },
+    wire::{BUNDLE_ALPN, SAVE_ALPN, read_header, write_status},
 };
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const CLOSE_GRACE: Duration = Duration::from_secs(5);
+
+struct ConnectionSlot {
+    active: Arc<AtomicUsize>,
+}
+
+impl ConnectionSlot {
+    fn acquire(active: &Arc<AtomicUsize>, maximum: usize) -> Option<Self> {
+        active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < maximum).then_some(current + 1)
+            })
+            .ok()
+            .map(|_| Self {
+                active: Arc::clone(active),
+            })
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub async fn serve(paths: Paths, allow_unpaired: bool) -> Result<()> {
     paths.ensure()?;
@@ -41,12 +69,17 @@ pub async fn serve(paths: Paths, allow_unpaired: bool) -> Result<()> {
         online_timeout()?,
     )
     .await?;
+    let maximum_connections = max_incoming_connections()?;
+    let handshake_deadline = handshake_timeout()?;
+    let active_connections = Arc::new(AtomicUsize::new(0));
 
     println!("{ticket}");
     eprintln!(
-        "funkey-iroh: progress and portable-bundle receiver online as {} (paired_only={})",
+        "funkey-iroh: progress and portable-bundle receiver online as {} (paired_only={}, max_connections={}, handshake_timeout={}s)",
         endpoint.id(),
-        !allow_unpaired
+        !allow_unpaired,
+        maximum_connections,
+        handshake_deadline.as_secs()
     );
 
     let shutdown = signal::ctrl_c();
@@ -58,15 +91,36 @@ pub async fn serve(paths: Paths, allow_unpaired: bool) -> Result<()> {
                 let Some(incoming) = incoming else {
                     break;
                 };
-                let connection = match incoming.await {
-                    Ok(connection) => connection,
-                    Err(error) => {
+                let connection = match timeout(handshake_deadline, incoming).await {
+                    Ok(Ok(connection)) => connection,
+                    Ok(Err(error)) => {
                         eprintln!("funkey-iroh: rejected incoming connection: {error:#}");
                         continue;
                     }
+                    Err(_) => {
+                        eprintln!(
+                            "funkey-iroh: incoming handshake exceeded {}s and was dropped",
+                            handshake_deadline.as_secs()
+                        );
+                        continue;
+                    }
                 };
+                let Some(slot) = ConnectionSlot::acquire(
+                    &active_connections,
+                    maximum_connections,
+                ) else {
+                    eprintln!(
+                        "funkey-iroh: refusing {} because {} transfer slots are busy",
+                        connection.remote_id(),
+                        maximum_connections
+                    );
+                    connection.close(3u32.into(), b"receiver busy");
+                    continue;
+                };
+
                 let connection_paths = paths.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     let protocol = connection.alpn().to_vec();
                     let result = if protocol.as_slice() == SAVE_ALPN {
                         handle_save_connection(
@@ -219,6 +273,7 @@ async fn receive_save(
             destination.display()
         )
     })?;
+    sync_directory(&destination_dir)?;
 
     let code = if conflict { "CONFLICT" } else { "STORED" };
     write_status(&mut send, code, &destination.display().to_string()).await?;
@@ -285,6 +340,13 @@ where
     Ok(())
 }
 
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)
+        .with_context(|| format!("open save destination directory {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync save destination directory {}", path.display()))
+}
+
 fn short_endpoint_id(endpoint_id: &EndpointId) -> String {
     endpoint_id.to_string().chars().take(16).collect()
 }
@@ -340,4 +402,22 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_slots_never_exceed_the_limit() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let first = ConnectionSlot::acquire(&active, 2).unwrap();
+        let second = ConnectionSlot::acquire(&active, 2).unwrap();
+        assert!(ConnectionSlot::acquire(&active, 2).is_none());
+        assert_eq!(active.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(active.load(Ordering::Acquire), 1);
+        drop(second);
+        assert_eq!(active.load(Ordering::Acquire), 0);
+    }
 }

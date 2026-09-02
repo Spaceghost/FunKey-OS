@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use crate::{
-    config::{Paths, online_timeout},
+    config::{Paths, handshake_timeout, online_timeout},
     endpoint,
     identity,
     peers::PeerBook,
@@ -41,6 +41,7 @@ pub async fn host(
     let secret = identity::load_or_create(&paths.identity)?;
     let endpoint = endpoint::bind(secret, vec![NETPLAY_ALPN.to_vec()]).await?;
     let ticket = endpoint::ticket(&endpoint, &paths.current_ticket, online_timeout()?).await?;
+    let handshake_deadline = handshake_timeout()?;
     println!("{ticket}");
     eprintln!(
         "funkey-iroh: waiting for netplay peer as {} on local UDP {} -> {}",
@@ -59,10 +60,17 @@ pub async fn host(
                 let Some(incoming) = incoming else {
                     break;
                 };
-                let connection = match incoming.await {
-                    Ok(connection) => connection,
-                    Err(error) => {
+                let connection = match tokio::time::timeout(handshake_deadline, incoming).await {
+                    Ok(Ok(connection)) => connection,
+                    Ok(Err(error)) => {
                         eprintln!("funkey-iroh: netplay connection failed during handshake: {error:#}");
+                        continue;
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "funkey-iroh: netplay handshake exceeded {}s and was dropped",
+                            handshake_deadline.as_secs()
+                        );
                         continue;
                     }
                 };
