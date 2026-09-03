@@ -5,7 +5,7 @@ Subject: [PATCH] Show SSH and SFTP details in the USB menu
 
 The USB menu is already only reachable when a data host has configured the
 gadget.  When the RNDIS function is present, use the otherwise empty lower
-half of that pane to show the credentials needed to connect to the device.
+half of that pane to show the connection and public-key provisioning details.
 
 Keep the mount/eject title and confirmation flow intact.  The connection
 details disappear while an action or confirmation is on screen so they do
@@ -60,7 +60,7 @@ index 388b8ce..58969e9 100644
 +				static const char *usb_network_info[] = {
 +					"SSH / SFTP",
 +					"root@192.168.137.2",
-+					"password: none"
++					"key: /authorized_keys"
 +				};
 +
 +				if(usb_network_enabled && !menu_action && !menu_confirmation){
