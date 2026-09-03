@@ -178,6 +178,7 @@ read -r -a ui_libs <<<"$("$sdl_config" --libs)"
     "$ui_dir/main.c" \
     -Wl,--gc-sections \
     "${ui_libs[@]}" \
+    -lSDL_ttf -lasound -lm \
     -o "$ui_binary"
 [[ -x "$ui_binary" ]] || {
     printf 'UI compiler did not produce %s\n' "$ui_binary" >&2
@@ -241,6 +242,10 @@ write $rootfs_files/usr/games/picoarch-iroh-wrapper /usr/games/picoarch
 write $ui_opk /usr/local/share/OPKs/Libretro/funkey-iroh-ui.opk
 EOF
 
+# Add pairing, inbox/outbox, post-game sync, and pre-game launch hooks
+# without replacing the hardened transport/debug variant builder.
+. "$repo/scripts/augment-iroh-ui-rootfs" prepare
+
 if [[ -n "$usb_profile" ]]; then
     cat >> "$commands" <<EOF
 cd /etc/default
@@ -301,6 +306,7 @@ dump_and_compare "$funkey_rootfs" /usr/games/picoarch \
     "$rootfs_files/usr/games/picoarch-iroh-wrapper" picoarch-wrapper
 dump_and_compare "$funkey_rootfs" /usr/local/share/OPKs/Libretro/funkey-iroh-ui.opk \
     "$ui_opk" opk
+. "$repo/scripts/augment-iroh-ui-rootfs" verify
 
 for image in "$funkey_rootfs" "$recovery_rootfs"; do
     fsck_status=0
