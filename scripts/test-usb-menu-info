@@ -29,7 +29,7 @@ assert_patch_contract() {
 assert_patch_contract "$retrofe_patch"
 assert_patch_contract "$gmenu2x_patch"
 
-# GMenu2X used to follow a moving HEAD.  Keep it pinned to the source this
+# GMenu2X used to follow a moving HEAD. Keep it pinned to the source this
 # patch was reviewed and built against.
 assert_line "$repo/FunKey/package/gmenu2x/gmenu2x.mk" \
 	'GMENU2X_VERSION = 8dbc7bfc482262ec0d23c1abad6089aef4bcb6d0'
@@ -37,12 +37,17 @@ assert_line "$repo/FunKey/package/gmenu2x/gmenu2x.mk" \
 # Prevent the on-device instructions from drifting away from the actual
 # network, authentication, and key-provisioning configuration.
 for rootfs in FunKey Recovery; do
+	case "$rootfs" in
+		FunKey) dropbear_init=S50dropbear ;;
+		Recovery) dropbear_init=S42dropbear ;;
+	esac
+
 	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/dhcpcd.conf" \
 		'static ip_address=192.168.137.2/24'
 	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/default/dropbear" \
 		'DROPBEAR_ARGS="-s -g"'
 	grep -Fq 'cp /mnt/authorized_keys /mnt/FunKey/.ssh/authorized_keys' \
-		"$repo/$rootfs/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+		"$repo/$rootfs/board/funkey/rootfs-overlay/etc/init.d/$dropbear_init"
 	assert_line "$repo/$rootfs/configs/$(printf '%s' "$rootfs" | tr '[:upper:]' '[:lower:]')_defconfig" \
 		'BR2_TARGET_GENERIC_ROOT_PASSWD=""'
 	assert_line "$repo/$rootfs/configs/$(printf '%s' "$rootfs" | tr '[:upper:]' '[:lower:]')_defconfig" \
