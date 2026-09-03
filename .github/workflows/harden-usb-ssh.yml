@@ -1,0 +1,792 @@
+name: Harden USB SSH for v2.4.0-rc.1
+
+on:
+  push:
+    branches: [rc/v2.4.0-rc.1]
+    paths: [.github/workflows/harden-usb-ssh.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harden-usb-ssh-v2.4.0-rc.1
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rc/v2.4.0-rc.1
+          fetch-depth: 0
+          submodules: false
+
+      - name: Install bridge-safe SSH isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              if new in text:
+                  return
+              if old not in text:
+                  raise SystemExit(f"anchor not found in {path}: {old!r}")
+              file.write_text(text.replace(old, new, 1))
+
+          def write(path: str, text: str) -> None:
+              file = Path(path)
+              file.parent.mkdir(parents=True, exist_ok=True)
+              file.write_text(text)
+
+          netfilter = """CONFIG_NETFILTER=y
+          CONFIG_NETFILTER_ADVANCED=y
+          CONFIG_NETFILTER_XTABLES=y
+          CONFIG_NETFILTER_XT_MATCH_MAC=y
+          CONFIG_IP_NF_IPTABLES=y
+          CONFIG_IP_NF_FILTER=y
+          """
+          for path in (
+              "FunKey/board/funkey/linux.config",
+              "Recovery/board/funkey/linux.config",
+          ):
+              replace_once(path, "CONFIG_INET=y\n", "CONFIG_INET=y\n" + netfilter)
+
+          for path in (
+              "FunKey/configs/funkey_defconfig",
+              "Recovery/configs/recovery_defconfig",
+          ):
+              replace_once(
+                  path,
+                  "BR2_PACKAGE_DROPBEAR=y\n",
+                  "BR2_PACKAGE_DROPBEAR=y\nBR2_PACKAGE_IPTABLES=y\n",
+              )
+
+          usb_network = r'''#!/bin/sh
+
+USB_NETWORK_SYSFS_ROOT=${USB_NETWORK_SYSFS_ROOT:-/sys}
+USB_NETWORK_GADGET_ROOT=${USB_NETWORK_GADGET_ROOT:-/sys/kernel/config/usb_gadget/FunKey}
+USB_NETWORK_INTERFACE=${USB_NETWORK_INTERFACE:-usb0}
+USB_NETWORK_DEVICE_ADDRESS=${USB_NETWORK_DEVICE_ADDRESS:-192.168.137.2}
+USB_NETWORK_HOST_ADDRESS=${USB_NETWORK_HOST_ADDRESS:-192.168.137.1}
+USB_NETWORK_SSH_PORT=${USB_NETWORK_SSH_PORT:-22}
+USB_NETWORK_SSH_CHAIN=${USB_NETWORK_SSH_CHAIN:-FUNKEY_USB_SSH}
+USB_NETWORK_IP=${USB_NETWORK_IP:-ip}
+USB_NETWORK_IPTABLES=${USB_NETWORK_IPTABLES:-iptables}
+
+usb_network_command_exists()
+{
+    case "$1" in
+        */*) [ -x "$1" ] ;;
+        *) command -v "$1" >/dev/null 2>&1 ;;
+    esac
+}
+
+usb_network_is_enabled()
+{
+    [ -e "$USB_NETWORK_SYSFS_ROOT/class/net/$USB_NETWORK_INTERFACE" ]
+}
+
+# A powered cable is not enough: the USB device controller reaches
+# "configured" only after a data host has enumerated the gadget. This
+# controller leaves that state stale after disconnect, but resets its speed.
+usb_data_is_configured()
+{
+    local usb_speed usb_speed_path usb_state usb_state_path usb_udc
+
+    [ -r "$USB_NETWORK_GADGET_ROOT/UDC" ] || return 1
+    usb_udc=
+    IFS= read -r usb_udc < "$USB_NETWORK_GADGET_ROOT/UDC" || return 1
+    [ -n "$usb_udc" ] || return 1
+    usb_state_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/state"
+    [ -r "$usb_state_path" ] || return 1
+    usb_state=
+    IFS= read -r usb_state < "$usb_state_path" || return 1
+    [ "$usb_state" = configured ] || return 1
+
+    usb_speed_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/current_speed"
+    [ -r "$usb_speed_path" ] || return 1
+    usb_speed=
+    IFS= read -r usb_speed < "$usb_speed_path" || return 1
+    case "$usb_speed" in
+        low-speed|full-speed|high-speed|wireless|super-speed|super-speed-plus)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+usb_network_is_ready()
+{
+    usb_network_is_enabled && usb_data_is_configured
+}
+
+usb_network_host_mac()
+{
+    local host_addr mac
+
+    for host_addr in "$USB_NETWORK_GADGET_ROOT"/functions/*.usb0/host_addr; do
+        [ -r "$host_addr" ] || continue
+        mac=
+        IFS= read -r mac < "$host_addr" || continue
+        if printf '%s\n' "$mac" |
+           grep -Eq '^[[:xdigit:]]{2}(:[[:xdigit:]]{2}){5}$'; then
+            printf '%s\n' "$mac" | tr 'A-F' 'a-f'
+            return 0
+        fi
+    done
+    return 1
+}
+
+usb_network_has_device_address()
+{
+    usb_network_command_exists "$USB_NETWORK_IP" || return 1
+    "$USB_NETWORK_IP" -4 addr show dev "$USB_NETWORK_INTERFACE" 2>/dev/null |
+        grep -Eq "[[:space:]]inet[[:space:]]+$USB_NETWORK_DEVICE_ADDRESS/"
+}
+
+usb_network_wait_for_device_address()
+{
+    local attempt limit
+
+    limit=${1:-10}
+    attempt=0
+    while ! usb_network_has_device_address; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt "$limit" ] || return 1
+        sleep 1
+    done
+}
+
+usb_network_pin_host_neighbor()
+{
+    local host_mac
+
+    host_mac=$1
+    usb_network_command_exists "$USB_NETWORK_IP" || return 1
+    "$USB_NETWORK_IP" neigh del "$USB_NETWORK_HOST_ADDRESS" \
+        dev "$USB_NETWORK_INTERFACE" 2>/dev/null || :
+    "$USB_NETWORK_IP" neigh add "$USB_NETWORK_HOST_ADDRESS" \
+        lladdr "$host_mac" nud permanent dev "$USB_NETWORK_INTERFACE"
+}
+
+# Install a fail-closed INPUT gate before Dropbear starts. A normal Ethernet
+# bridge preserves the original source MAC, so bridged LAN peers cannot pass
+# this rule. The directly attached host owns both the gadget-assigned MAC and
+# the sole usable peer address in the /30.
+usb_network_install_ssh_guard()
+{
+    local host_mac
+
+    case "$USB_NETWORK_SSH_PORT" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$USB_NETWORK_SSH_PORT" -ge 1 ] &&
+        [ "$USB_NETWORK_SSH_PORT" -le 65535 ] || return 1
+    usb_network_command_exists "$USB_NETWORK_IPTABLES" || return 1
+    host_mac=$(usb_network_host_mac) || return 1
+    usb_network_wait_for_device_address 10 || return 1
+    usb_network_pin_host_neighbor "$host_mac" || return 1
+
+    while "$USB_NETWORK_IPTABLES" -D INPUT -p tcp \
+        --dport "$USB_NETWORK_SSH_PORT" \
+        -j "$USB_NETWORK_SSH_CHAIN" 2>/dev/null; do
+        :
+    done
+
+    "$USB_NETWORK_IPTABLES" -F "$USB_NETWORK_SSH_CHAIN" 2>/dev/null ||
+        "$USB_NETWORK_IPTABLES" -N "$USB_NETWORK_SSH_CHAIN" || return 1
+
+    "$USB_NETWORK_IPTABLES" -A "$USB_NETWORK_SSH_CHAIN" \
+        -i "$USB_NETWORK_INTERFACE" \
+        -s "$USB_NETWORK_HOST_ADDRESS" \
+        -d "$USB_NETWORK_DEVICE_ADDRESS" \
+        -p tcp --dport "$USB_NETWORK_SSH_PORT" \
+        -m mac --mac-source "$host_mac" \
+        -j ACCEPT || return 1
+    "$USB_NETWORK_IPTABLES" -A "$USB_NETWORK_SSH_CHAIN" -j DROP || return 1
+    "$USB_NETWORK_IPTABLES" -I INPUT 1 -p tcp \
+        --dport "$USB_NETWORK_SSH_PORT" \
+        -j "$USB_NETWORK_SSH_CHAIN" || return 1
+}
+'''
+          for path in (
+              "FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network",
+              "Recovery/board/funkey/rootfs-overlay/usr/local/lib/usb_network",
+          ):
+              write(path, usb_network)
+
+          dropbear_init = r'''#!/bin/sh
+# Start Dropbear only after the directly attached USB host is pinned and the
+# bridge-safe MAC/IP firewall gate is installed.
+
+SELF=$(basename "$0")
+. /usr/local/lib/usb_network
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_enabled >/dev/null 2>&1 || usb_debug_enabled() { return 1; }
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_run >/dev/null 2>&1 ||
+    usb_debug_run() { shift; "$@"; }
+
+test -r /etc/default/dropbear && . /etc/default/dropbear
+DROPBEAR_ARGS=${DROPBEAR_ARGS:-"-s -g"}
+DROPBEAR_BIND_ADDRESS=${DROPBEAR_BIND_ADDRESS:-$USB_NETWORK_DEVICE_ADDRESS}
+DROPBEAR_PORT=${DROPBEAR_PORT:-$USB_NETWORK_SSH_PORT}
+
+run_dropbear_daemon()
+{
+    dropbear_component=$1
+    shift
+    if usb_debug_enabled; then
+        usb_debug_run "$dropbear_component" "$@"
+    else
+        "$@"
+    fi
+}
+
+dropbear_arguments_are_safe()
+{
+    local argument
+
+    for argument in $DROPBEAR_ARGS; do
+        case "$argument" in
+            -p|-p*)
+                echo "dropbear: -p is managed by the USB isolation layer" >&2
+                return 1
+                ;;
+        esac
+    done
+}
+
+prepare_authorized_keys()
+{
+    # Standard and Iroh images are key-only. Their root SSH directory is a
+    # build-time symlink into the writable data partition. A missing key keeps
+    # the service cryptographically locked without weakening the USB gate.
+    mkdir -p /mnt/FunKey/.ssh
+    if [ -r /mnt/authorized_keys ] &&
+       [ ! -s /mnt/FunKey/.ssh/authorized_keys ]; then
+        cp /mnt/authorized_keys /mnt/FunKey/.ssh/authorized_keys
+    fi
+}
+
+start()
+{
+    if ! usb_network_is_ready; then
+        usb_debug_log dropbear "start skipped because usb0 is not configured"
+        return 0
+    fi
+    if ! dropbear_arguments_are_safe; then
+        usb_debug_log dropbear "refusing unsafe listen arguments"
+        return 1
+    fi
+
+    USB_NETWORK_DEVICE_ADDRESS=$DROPBEAR_BIND_ADDRESS
+    USB_NETWORK_SSH_PORT=$DROPBEAR_PORT
+    export USB_NETWORK_DEVICE_ADDRESS USB_NETWORK_SSH_PORT
+    if ! usb_network_install_ssh_guard; then
+        echo "dropbear: USB host isolation could not be installed; refusing to start" >&2
+        usb_debug_log dropbear "host isolation failed; daemon not started"
+        return 1
+    fi
+
+    DROPBEAR_RUNTIME_ARGS="$DROPBEAR_ARGS -R -p $DROPBEAR_BIND_ADDRESS:$DROPBEAR_PORT"
+    prepare_authorized_keys
+
+    # If /etc/dropbear is a symlink to /var/run/dropbear, and
+    #   - the filesystem is RO, create the target directory;
+    #   - the filesystem is RW, replace the symlink with a real directory.
+    if [ -L /etc/dropbear ] &&
+       [ "$(readlink /etc/dropbear)" = "/var/run/dropbear" ]; then
+        if rm -f /etc/dropbear >/dev/null 2>&1; then
+            mkdir -p /etc/dropbear
+        else
+            echo "No persistent location to store SSH host keys. New keys will be"
+            echo "generated at each boot. Are you sure this is what you want to do?"
+            mkdir -p "$(readlink /etc/dropbear)"
+        fi
+    fi
+
+    printf "Starting dropbear sshd: "
+    umask 077
+    run_dropbear_daemon dropbear-daemon-start \
+        start-stop-daemon -S -q -o -p /var/run/dropbear.pid \
+        --exec /usr/sbin/dropbear -- $DROPBEAR_RUNTIME_ARGS
+    daemon_status=$?
+    [ "$daemon_status" -eq 0 ] && echo "OK" || echo "FAIL"
+    usb_debug_log dropbear \
+        "start status=$daemon_status bind=$DROPBEAR_BIND_ADDRESS:$DROPBEAR_PORT"
+    return "$daemon_status"
+}
+
+stop()
+{
+    printf "Stopping dropbear sshd: "
+    run_dropbear_daemon dropbear-daemon-stop \
+        start-stop-daemon -K -q -o -p /var/run/dropbear.pid
+    daemon_status=$?
+    [ "$daemon_status" -eq 0 ] && echo "OK" || echo "FAIL"
+    usb_debug_log dropbear "stop status=$daemon_status"
+    # Deliberately leave the INPUT gate installed: stopped must remain closed.
+    return "$daemon_status"
+}
+
+restart()
+{
+    stop
+    start
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart|reload) restart ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac
+
+exit $?
+'''
+          write(
+              "FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear",
+              dropbear_init,
+          )
+          write(
+              "Recovery/board/funkey/rootfs-overlay/etc/init.d/S42dropbear",
+              dropbear_init,
+          )
+
+          production_dropbear = r'''#!/bin/sh
+
+# Standard and Iroh firmware: public-key authentication only.
+# Reachability is additionally restricted to the directly attached USB host.
+DROPBEAR_ARGS="-s -g"
+DROPBEAR_BIND_ADDRESS=192.168.137.2
+DROPBEAR_PORT=22
+'''
+          for path in (
+              "FunKey/board/funkey/rootfs-overlay/etc/default/dropbear",
+              "Recovery/board/funkey/rootfs-overlay/etc/default/dropbear",
+          ):
+              write(path, production_dropbear)
+
+          write(
+              "scripts/dropbear-usb-debug",
+              r'''#!/bin/sh
+
+# Deliberately passwordless engineering recovery, but still reachable only
+# through the directly attached USB host MAC/IP gate.
+DROPBEAR_ARGS="-B"
+DROPBEAR_BIND_ADDRESS=192.168.137.2
+DROPBEAR_PORT=22
+''',
+          )
+
+          for path in (
+              "FunKey/board/funkey/post-build.sh",
+              "Recovery/board/funkey/post-build.sh",
+          ):
+              replace_once(
+                  path,
+                  'ln -s /tmp "${TARGET_DIR}/etc/dropbear"\n',
+                  'ln -s /tmp "${TARGET_DIR}/etc/dropbear"\n\n'
+                  '# Keep authorized keys on the writable data partition.\n'
+                  'rm -rf "${TARGET_DIR}/root/.ssh"\n'
+                  'ln -s /mnt/FunKey/.ssh "${TARGET_DIR}/root/.ssh"\n',
+              )
+
+          replace_once(
+              "scripts/build-usb-variant",
+              'profile_argument=${3:?usage: build-usb-variant VERSION VARIANT PROFILE}\n',
+              'profile_argument=${3:?usage: build-usb-variant VERSION VARIANT PROFILE [DROPBEAR_PROFILE]}\n'
+              'dropbear_profile_argument=${4:-}\n',
+          )
+          replace_once(
+              "scripts/build-usb-variant",
+              'if [[ ! -r "$profile" ]]; then\n'
+              '    printf \'USB profile is missing or unreadable: %s\\n\' "$profile" >&2\n'
+              '    exit 2\n'
+              'fi\n\n'
+              'variant_version=',
+              'if [[ ! -r "$profile" ]]; then\n'
+              '    printf \'USB profile is missing or unreadable: %s\\n\' "$profile" >&2\n'
+              '    exit 2\n'
+              'fi\n\n'
+              'dropbear_profile=\n'
+              'if [[ -n "$dropbear_profile_argument" ]]; then\n'
+              '    case "$dropbear_profile_argument" in\n'
+              '        /*) dropbear_profile=$dropbear_profile_argument ;;\n'
+              '        *) dropbear_profile=$repo/$dropbear_profile_argument ;;\n'
+              '    esac\n'
+              '    [[ -r "$dropbear_profile" ]] || {\n'
+              '        printf \'Dropbear profile is missing or unreadable: %s\\n\' "$dropbear_profile" >&2\n'
+              '        exit 2\n'
+              '    }\n'
+              'fi\n\n'
+              'variant_version=',
+          )
+          replace_once(
+              "scripts/build-usb-variant",
+              """        printf 'write %s %s\\n' "$profile" 'usb-gadget'
+              } > "$commands"
+              """,
+              """        printf 'write %s %s\\n' "$profile" 'usb-gadget'
+                  if [[ -n "$dropbear_profile" ]]; then
+                      printf '%s\\n' 'rm dropbear'
+                      printf 'write %s %s\\n' "$dropbear_profile" 'dropbear'
+                  fi
+              } > "$commands"
+              """,
+          )
+          replace_once(
+              "scripts/build-usb-variant",
+              """    if [[ "$embedded" != "$expected" ]]; then
+                      printf 'embedded USB profile does not match %s in %s\\n' "$profile" "$image" >&2
+                      diff -u <(printf '%s\\n' "$expected") <(printf '%s\\n' "$embedded") >&2 || true
+                      exit 1
+                  fi
+
+                  fsck_status=0
+              """,
+              """    if [[ "$embedded" != "$expected" ]]; then
+                      printf 'embedded USB profile does not match %s in %s\\n' "$profile" "$image" >&2
+                      diff -u <(printf '%s\\n' "$expected") <(printf '%s\\n' "$embedded") >&2 || true
+                      exit 1
+                  fi
+                  if [[ -n "$dropbear_profile" ]]; then
+                      embedded_dropbear=$("$debugfs_bin" -R 'cat /etc/default/dropbear' "$image" 2>/dev/null)
+                      expected_dropbear=$(cat "$dropbear_profile")
+                      [[ "$embedded_dropbear" = "$expected_dropbear" ]] || {
+                          printf 'embedded Dropbear profile mismatch in %s\\n' "$image" >&2
+                          exit 1
+                      }
+                  fi
+
+                  fsck_status=0
+              """,
+          )
+          replace_once(
+              "scripts/build-usb-debug-variant",
+              '    usb-debug scripts/usb-gadget-debug\n',
+              '    usb-debug scripts/usb-gadget-debug scripts/dropbear-usb-debug\n',
+          )
+
+          replace_once(
+              "scripts/build-iroh-variant",
+              'usb_profile_argument=${3:-}\n',
+              'usb_profile_argument=${3:-}\ndropbear_profile_argument=${4:-}\n',
+          )
+          replace_once(
+              "scripts/build-iroh-variant",
+              """else
+                  usb_profile=
+              fi
+
+              restore_rootfs()
+              """,
+              """else
+                  usb_profile=
+              fi
+
+              dropbear_profile=
+              if [[ -n "$dropbear_profile_argument" ]]; then
+                  case "$dropbear_profile_argument" in
+                      /*) dropbear_profile=$dropbear_profile_argument ;;
+                      *) dropbear_profile=$repo/$dropbear_profile_argument ;;
+                  esac
+                  [[ -r "$dropbear_profile" ]] || {
+                      printf 'Dropbear profile is missing or unreadable: %s\\n' "$dropbear_profile" >&2
+                      exit 2
+                  }
+              fi
+
+              restore_rootfs()
+              """,
+          )
+          replace_once(
+              "scripts/build-iroh-variant",
+              'if [[ -n "$usb_profile" ]]; then\n'
+              '    cp --reflink=auto --sparse=always "$recovery_rootfs" "$recovery_backup"\n'
+              'fi\n',
+              'if [[ -n "$usb_profile" || -n "$dropbear_profile" ]]; then\n'
+              '    cp --reflink=auto --sparse=always "$recovery_rootfs" "$recovery_backup"\n'
+              'fi\n',
+          )
+          replace_once(
+              "scripts/build-iroh-variant",
+              """if [[ -n "$usb_profile" ]]; then
+                  cat >> "$commands" <<EOF
+              cd /etc/default
+              rm usb-gadget
+              write $usb_profile usb-gadget
+              EOF
+              fi
+
+              E2FSPROGS_FAKE_TIME=
+              """,
+              """if [[ -n "$usb_profile" ]]; then
+                  cat >> "$commands" <<EOF
+              cd /etc/default
+              rm usb-gadget
+              write $usb_profile usb-gadget
+              EOF
+              fi
+              if [[ -n "$dropbear_profile" ]]; then
+                  cat >> "$commands" <<EOF
+              cd /etc/default
+              rm dropbear
+              write $dropbear_profile dropbear
+              EOF
+              fi
+
+              E2FSPROGS_FAKE_TIME=
+              """,
+          )
+          replace_once(
+              "scripts/build-iroh-variant",
+              """if [[ -n "$usb_profile" ]]; then
+                  recovery_commands="$backup_dir/debugfs-recovery.commands"
+                  cat > "$recovery_commands" <<EOF
+              cd /etc/default
+              rm usb-gadget
+              write $usb_profile usb-gadget
+              EOF
+                  E2FSPROGS_FAKE_TIME="$filesystem_time" \\
+                      "$debugfs_bin" -w -f "$recovery_commands" "$recovery_rootfs" \\
+                      >"$backup_dir/debugfs-recovery.log" 2>&1 || {
+                          cat "$backup_dir/debugfs-recovery.log" >&2
+                          exit 1
+                      }
+              fi
+              """,
+              """if [[ -n "$usb_profile" || -n "$dropbear_profile" ]]; then
+                  recovery_commands="$backup_dir/debugfs-recovery.commands"
+                  : > "$recovery_commands"
+                  if [[ -n "$usb_profile" ]]; then
+                      cat >> "$recovery_commands" <<EOF
+              cd /etc/default
+              rm usb-gadget
+              write $usb_profile usb-gadget
+              EOF
+                  fi
+                  if [[ -n "$dropbear_profile" ]]; then
+                      cat >> "$recovery_commands" <<EOF
+              cd /etc/default
+              rm dropbear
+              write $dropbear_profile dropbear
+              EOF
+                  fi
+                  E2FSPROGS_FAKE_TIME="$filesystem_time" \\
+                      "$debugfs_bin" -w -f "$recovery_commands" "$recovery_rootfs" \\
+                      >"$backup_dir/debugfs-recovery.log" 2>&1 || {
+                          cat "$backup_dir/debugfs-recovery.log" >&2
+                          exit 1
+                      }
+              fi
+              """,
+          )
+          replace_once(
+              "scripts/build-iroh-variant",
+              """dump_and_compare "$funkey_rootfs" /usr/local/share/OPKs/Libretro/funkey-iroh-ui.opk \\
+                  "$ui_opk" opk
+              . "$repo/scripts/augment-iroh-ui-rootfs" verify
+              """,
+              """dump_and_compare "$funkey_rootfs" /usr/local/share/OPKs/Libretro/funkey-iroh-ui.opk \\
+                  "$ui_opk" opk
+              if [[ -n "$dropbear_profile" ]]; then
+                  dump_and_compare "$funkey_rootfs" /etc/default/dropbear \\
+                      "$dropbear_profile" dropbear-funkey
+                  dump_and_compare "$recovery_rootfs" /etc/default/dropbear \\
+                      "$dropbear_profile" dropbear-recovery
+              fi
+              . "$repo/scripts/augment-iroh-ui-rootfs" verify
+              """,
+          )
+          replace_once(
+              "scripts/build-iroh-firmware",
+              '        scripts/usb-gadget-debug\n',
+              '        scripts/usb-gadget-debug \\\n        scripts/dropbear-usb-debug\n',
+          )
+
+          test_script = r'''#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+sys="$tmp/sys"
+gadget="$tmp/gadget"
+mock="$tmp/mock"
+mkdir -p \
+    "$sys/class/net/usb0" \
+    "$sys/class/udc/test-udc" \
+    "$gadget/functions/rndis.usb0" \
+    "$mock"
+printf '%s\n' test-udc > "$gadget/UDC"
+printf '%s\n' configured > "$sys/class/udc/test-udc/state"
+printf '%s\n' high-speed > "$sys/class/udc/test-udc/current_speed"
+printf '%s\n' 12:34:56:78:9A:BC > "$gadget/functions/rndis.usb0/host_addr"
+
+cat > "$mock/ip" <<'EOF'
+#!/bin/sh
+printf 'ip %s\n' "$*" >> "$MOCK_LOG"
+if [ "$1" = -4 ]; then
+    printf '5: usb0: <UP> mtu 1500\n    inet 192.168.137.2/30 scope global usb0\n'
+    exit 0
+fi
+if [ "$1" = neigh ] && [ "$2" = del ]; then
+    exit 1
+fi
+exit 0
+EOF
+
+cat > "$mock/iptables" <<'EOF'
+#!/bin/sh
+printf 'iptables %s\n' "$*" >> "$MOCK_LOG"
+case "$1" in
+    -D|-F) exit 1 ;;
+    *) exit 0 ;;
+esac
+EOF
+chmod 0755 "$mock/ip" "$mock/iptables"
+
+export MOCK_LOG="$tmp/commands.log"
+export USB_NETWORK_SYSFS_ROOT="$sys"
+export USB_NETWORK_GADGET_ROOT="$gadget"
+export USB_NETWORK_IP="$mock/ip"
+export USB_NETWORK_IPTABLES="$mock/iptables"
+
+# shellcheck disable=SC1090
+. "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network"
+usb_network_is_ready
+[ "$(usb_network_host_mac)" = 12:34:56:78:9a:bc ]
+usb_network_install_ssh_guard
+
+grep -F -- \
+    'ip neigh add 192.168.137.1 lladdr 12:34:56:78:9a:bc nud permanent dev usb0' \
+    "$MOCK_LOG"
+grep -F -- \
+    'iptables -A FUNKEY_USB_SSH -i usb0 -s 192.168.137.1 -d 192.168.137.2 -p tcp --dport 22 -m mac --mac-source 12:34:56:78:9a:bc -j ACCEPT' \
+    "$MOCK_LOG"
+grep -F -- 'iptables -A FUNKEY_USB_SSH -j DROP' "$MOCK_LOG"
+grep -F -- \
+    'iptables -I INPUT 1 -p tcp --dport 22 -j FUNKEY_USB_SSH' \
+    "$MOCK_LOG"
+
+for shell in dash 'busybox sh'; do
+    $shell -n "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network"
+    $shell -n "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+    $shell -n "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S42dropbear"
+done
+
+cmp \
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network" \
+    "$repo/Recovery/board/funkey/rootfs-overlay/usr/local/lib/usb_network"
+grep -qx 'DROPBEAR_ARGS="-s -g"' \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/default/dropbear"
+grep -qx 'DROPBEAR_ARGS="-s -g"' \
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/default/dropbear"
+grep -qx 'DROPBEAR_ARGS="-B"' "$repo/scripts/dropbear-usb-debug"
+grep -q 'usb_network_install_ssh_guard' \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+grep -q -- '-p $DROPBEAR_BIND_ADDRESS:$DROPBEAR_PORT' \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+
+for config in \
+    "$repo/FunKey/configs/funkey_defconfig" \
+    "$repo/Recovery/configs/recovery_defconfig"
+do
+    grep -qx 'BR2_PACKAGE_IPTABLES=y' "$config"
+done
+for config in \
+    "$repo/FunKey/board/funkey/linux.config" \
+    "$repo/Recovery/board/funkey/linux.config"
+do
+    grep -qx 'CONFIG_NETFILTER=y' "$config"
+    grep -qx 'CONFIG_NETFILTER_XT_MATCH_MAC=y' "$config"
+    grep -qx 'CONFIG_IP_NF_FILTER=y' "$config"
+done
+
+grep -q 'dropbear_profile_argument' "$repo/scripts/build-usb-variant"
+grep -q 'scripts/dropbear-usb-debug' "$repo/scripts/build-usb-debug-variant"
+grep -q 'dropbear_profile_argument' "$repo/scripts/build-iroh-variant"
+grep -q 'scripts/dropbear-usb-debug' "$repo/scripts/build-iroh-firmware"
+
+printf 'USB SSH isolation tests: PASS\n'
+'''
+          write("scripts/test-usb-ssh-guard", test_script)
+
+          write(
+              "docs/usb-ssh-isolation.md",
+              r'''# USB SSH isolation
+
+Dropbear is bound only to `192.168.137.2:22`. Before it starts, firmware
+installs a fail-closed IPv4 INPUT chain that accepts SSH only when all of the
+following match:
+
+- ingress interface `usb0`;
+- peer address `192.168.137.1`;
+- device address `192.168.137.2`;
+- the host MAC assigned by the active RNDIS, ECM, or NCM gadget function.
+
+The peer neighbor entry is pinned to that same MAC. A normal layer-2 bridge
+preserves a frame's original source MAC, so another machine on the bridged LAN
+cannot reach Dropbear. Standard and Iroh images additionally require public-key
+authentication from `/mnt/FunKey/.ssh/authorized_keys`.
+
+Only images whose name contains `usb-debug` inject the passwordless engineering
+profile. They retain the same interface, address, and host-MAC gate.
+
+No endpoint can distinguish a packet the directly attached host deliberately
+re-originates itself. Host-side NAT, an SSH proxy, or a compromised host is
+therefore inside the trust boundary; merely bridging the interface is not.
+''',
+          )
+          PY
+
+          chmod 0755 \
+            FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network \
+            Recovery/board/funkey/rootfs-overlay/usr/local/lib/usb_network \
+            FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear \
+            Recovery/board/funkey/rootfs-overlay/etc/init.d/S42dropbear \
+            scripts/test-usb-ssh-guard
+          chmod 0644 scripts/dropbear-usb-debug
+
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends busybox dash
+          bash -n \
+            scripts/build-usb-variant \
+            scripts/build-usb-debug-variant \
+            scripts/build-iroh-variant \
+            scripts/build-iroh-firmware \
+            scripts/test-usb-ssh-guard
+          ./scripts/test-usb-ssh-guard
+          git diff --check
+
+          git add -A
+          git commit -m 'security: confine SSH to the directly attached USB host' \
+            -m 'Bind Dropbear to the gadget /30, pin the host neighbor, and fail closed behind an iptables source-MAC gate. Keep normal and Iroh firmware key-only; inject blank-root access only into explicitly named USB-debug variants.'
+          release_sha=$(git rev-parse HEAD)
+          release_tree=$(git rev-parse 'HEAD^{tree}')
+          printf 'release_sha=%s\n' "$release_sha" >> "$GITHUB_OUTPUT"
+          printf 'release_tree=%s\n' "$release_tree" >> "$GITHUB_OUTPUT"
+          git push origin \
+            HEAD:refs/heads/rc/v2.4.0-rc.1 \
+            HEAD:refs/heads/rg-nano-next
