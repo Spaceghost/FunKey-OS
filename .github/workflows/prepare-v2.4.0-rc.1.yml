@@ -40,6 +40,7 @@ jobs:
           upstream=$(git rev-parse origin/master)
           iroh=$(git rev-parse origin/feature/iroh-save-netplay)
           ui=$(git rev-parse origin/feature/iroh-launcher-ui)
+          upstream_buildroot=$(git rev-parse "$upstream:buildroot")
           git checkout -B rc/v2.4.0-rc.1 "$original_rg"
 
           resolve_upstream_conflicts() {
@@ -61,12 +62,16 @@ jobs:
                 genimage.cfg|genimage-prod.cfg)
                   git checkout --ours -- "$path"
                   ;;
-                buildroot|\
                 FunKey/board/funkey/rootfs-overlay/usr/games/*|\
                 FunKey/board/funkey/rootfs-overlay/usr/local/share/OPKs/Settings/poweroff_funkey-s.opk|\
                 FunKey/board/funkey/rootfs-overlay/usr/local/share/OPKs/Settings/reboot_funkey-s.opk|\
                 FunKey/board/funkey/rootfs-overlay/usr/local/share/funkey_files.zip)
                   git checkout --theirs -- "$path"
+                  ;;
+                buildroot)
+                  # Resolve the gitlink directly. A checkout with submodules
+                  # disabled has no child repository for `git add` to inspect.
+                  git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
                   ;;
                 *)
                   printf 'Unrecognized upstream conflict: %s\n' "$path" >&2
@@ -77,7 +82,8 @@ jobs:
             if (( unknown != 0 )); then
               return 1
             fi
-            git add -A
+            git add -A -- . ':(exclude)buildroot'
+            git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
             if git diff --name-only --diff-filter=U | grep -q .; then
               printf 'Unresolved paths remain:\n' >&2
               git diff --name-only --diff-filter=U >&2
@@ -92,8 +98,8 @@ jobs:
           # Preserve the small RG Nano build additions while deliberately
           # taking upstream's newer Buildroot gitlink.
           git checkout "$original_rg" -- .gitignore .gitmodules FunKey/Config.in
-          git checkout "$upstream" -- buildroot
-          git add -A
+          git add .gitignore .gitmodules FunKey/Config.in
+          git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
           git commit \
             -m 'Merge upstream master into the RG Nano release line' \
             -m 'Preserve the RG Nano build/debug additions while incorporating the 54 upstream commits through 6739391. Use upstream’s newer Buildroot pin and frontend/game content; keep the RG Nano ccache, branch-tracking, compact image layout, deterministic package pins, and recovery/update diagnostics.'
@@ -115,6 +121,7 @@ jobs:
           test "$(git merge-base "$upstream" HEAD)" = "$upstream"
           test "$(git merge-base "$iroh" HEAD)" = "$iroh"
           test "$(git merge-base "$ui" HEAD)" = "$ui"
+          test "$(git rev-parse 'HEAD:buildroot')" = "$upstream_buildroot"
           test -f .github/workflows/release.yml
           test -f tools/funkey-iroh/Cargo.lock
           test -f tools/funkey-iroh-ui/main.c
@@ -124,6 +131,7 @@ jobs:
           {
             echo "original_rg=$original_rg"
             echo "upstream=$upstream"
+            echo "upstream_buildroot=$upstream_buildroot"
             echo "iroh=$iroh"
             echo "ui=$ui"
             echo "integration_commit=$(git rev-parse HEAD)"
