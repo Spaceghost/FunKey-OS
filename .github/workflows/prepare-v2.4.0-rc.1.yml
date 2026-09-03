@@ -1,0 +1,139 @@
+name: Prepare v2.4.0-rc.1 integration
+
+on:
+  push:
+    branches:
+      - automation/prepare-v2.4.0-rc.1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-v2.4.0-rc.1
+  cancel-in-progress: true
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the RG Nano integration line
+        uses: actions/checkout@v4
+        with:
+          ref: automation/prepare-v2.4.0-rc.1
+          fetch-depth: 0
+          submodules: false
+
+      - name: Merge upstream, Iroh transport, and launcher UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin \
+            master \
+            rg-nano-next \
+            feature/iroh-save-netplay \
+            feature/iroh-launcher-ui
+
+          original_rg=$(git rev-parse origin/rg-nano-next)
+          upstream=$(git rev-parse origin/master)
+          iroh=$(git rev-parse origin/feature/iroh-save-netplay)
+          ui=$(git rev-parse origin/feature/iroh-launcher-ui)
+          git checkout -B rc/v2.4.0-rc.1 "$original_rg"
+
+          resolve_upstream_conflicts() {
+            local path unknown=0
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            printf 'Upstream merge conflicts (%s):\n' "${#conflicts[@]}"
+            printf '  %s\n' "${conflicts[@]}"
+            for path in "${conflicts[@]}"; do
+              case "$path" in
+                .gitignore|.gitmodules|FunKey/Config.in)
+                  git checkout --ours -- "$path"
+                  ;;
+                buildroot|FunKey/board/funkey/rootfs-overlay/usr/games/*)
+                  git checkout --theirs -- "$path"
+                  ;;
+                FunKey/board/funkey/rootfs-overlay/etc/fstab|FunKey/board/funkey/rootfs-overlay/root/.profile)
+                  # These are currently byte-identical on both tips. Keep the
+                  # RG Nano side explicitly so a future accidental difference
+                  # is visible in review rather than selected by rename logic.
+                  git checkout --ours -- "$path"
+                  ;;
+                *)
+                  printf 'Unrecognized upstream conflict: %s\n' "$path" >&2
+                  unknown=1
+                  ;;
+              esac
+            done
+            if (( unknown != 0 )); then
+              return 1
+            fi
+            git add -A
+            if git diff --name-only --diff-filter=U | grep -q .; then
+              printf 'Unresolved paths remain:\n' >&2
+              git diff --name-only --diff-filter=U >&2
+              return 1
+            fi
+          }
+
+          if ! git merge --no-ff --no-commit "$upstream"; then
+            resolve_upstream_conflicts
+          fi
+
+          # Preserve the small RG Nano build additions while deliberately
+          # taking upstream's newer Buildroot gitlink.
+          git checkout "$original_rg" -- .gitignore .gitmodules FunKey/Config.in
+          git checkout "$upstream" -- buildroot
+          git add -A
+          git commit -m "Merge upstream master into the RG Nano release line
+
+Preserve the RG Nano build/debug additions while incorporating the 54
+upstream commits through 6739391. Use upstream's newer Buildroot pin and
+frontend/game content; keep the RG Nano ccache, branch-tracking, and gmu
+configuration."
+
+          merge_component() {
+            local ref=$1 message=$2
+            if ! git merge --no-ff --no-commit "$ref"; then
+              printf 'Unexpected conflicts while merging %s:\n' "$ref" >&2
+              git diff --name-only --diff-filter=U >&2
+              return 1
+            fi
+            git commit -m "$message"
+          }
+
+          merge_component "$iroh" "Merge Iroh save, savestate, portable-library, SFTP, and transport support"
+          merge_component "$ui" "Merge the Iroh launcher UI and post-game synchronization flow"
+
+          git diff --check
+          test "$(git merge-base "$upstream" HEAD)" = "$upstream"
+          test "$(git merge-base "$iroh" HEAD)" = "$iroh"
+          test "$(git merge-base "$ui" HEAD)" = "$ui"
+          test -f .github/workflows/release.yml
+          test -f tools/funkey-iroh/Cargo.lock
+          test -f tools/funkey-iroh-ui/main.c
+          test -x scripts/build-iroh-firmware
+          test -x scripts/test-iroh-portability
+
+          {
+            echo "original_rg=$original_rg"
+            echo "upstream=$upstream"
+            echo "iroh=$iroh"
+            echo "ui=$ui"
+            echo "integration_commit=$(git rev-parse HEAD)"
+            echo "integration_tree=$(git rev-parse 'HEAD^{tree}')"
+            echo
+            git --no-pager log --oneline --decorate -8
+          } | tee PREPARE-RC-REPORT.txt
+
+          git push origin HEAD:refs/heads/rc/v2.4.0-rc.1 --force-with-lease
+
+      - name: Upload integration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2.4.0-rc.1 integration report
+          if-no-files-found: warn
+          path: PREPARE-RC-REPORT.txt
