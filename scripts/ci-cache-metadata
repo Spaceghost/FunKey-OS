@@ -28,7 +28,7 @@ image_material() {
 }
 
 host_material() {
-	printf '%s\n' 'schema=funkey-build-state-v2'
+	printf '%s\n' 'schema=funkey-build-state-v3'
 	if [ -r /etc/os-release ]; then
 		(
 			. /etc/os-release
@@ -51,11 +51,13 @@ host_material() {
 	git_object scripts/install-zig-cc
 	git_object scripts/install-zig-host-tools
 	git_object scripts/prepare-buildroot
+	git_object scripts/zig-as-wrapper
+	git_object scripts/zig-cc-wrapper
 	git_object scripts/zig-host-compiler
 }
 
 ccache_material() {
-	printf '%s\n' 'schema=funkey-ccache-v2'
+	printf '%s\n' 'schema=funkey-ccache-v3'
 	if [ -r /etc/os-release ]; then
 		(
 			. /etc/os-release
@@ -75,6 +77,8 @@ ccache_material() {
 	git_object scripts/ci-cache-metadata
 	git_object scripts/install-zig-cc
 	git_object scripts/install-zig-host-tools
+	git_object scripts/zig-as-wrapper
+	git_object scripts/zig-cc-wrapper
 	git_object scripts/zig-host-compiler
 	for config in FunKey/configs/funkey_defconfig Recovery/configs/recovery_defconfig; do
 		printf 'config=%s\n' "$config"

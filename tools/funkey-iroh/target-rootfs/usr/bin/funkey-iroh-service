@@ -1,0 +1,218 @@
+#!/bin/sh
+set -u
+
+DAEMON=${FUNKEY_IROH_BIN:-/usr/bin/funkey-iroh}
+LIBRARY_TOOL=${FUNKEY_IROH_LIBRARY_TOOL:-/usr/bin/funkey-iroh-library}
+INIT=/etc/init.d/S44funkey-iroh
+CONFIG=/etc/default/funkey-iroh
+
+[ -r "$CONFIG" ] && . "$CONFIG"
+FUNKEY_IROH_STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+FUNKEY_IROH_INBOX=${FUNKEY_IROH_INBOX:-$FUNKEY_IROH_STATE_DIR/inbox}
+FUNKEY_IROH_BUNDLE_INBOX=${FUNKEY_IROH_BUNDLE_INBOX:-$FUNKEY_IROH_STATE_DIR/bundle-inbox}
+FUNKEY_IROH_LIBRARY=${FUNKEY_IROH_LIBRARY:-/mnt/FunKey/Shared Games}
+ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
+TICKET_FILE=$FUNKEY_IROH_STATE_DIR/current-ticket
+LOG_FILE=$FUNKEY_IROH_STATE_DIR/service.log
+LOCK_DIR=$FUNKEY_IROH_STATE_DIR/endpoint.lock
+LOCK_PID=$LOCK_DIR/pid
+USB_NETWORK_MARKER=/mnt/usbnet
+
+export FUNKEY_IROH_STATE_DIR
+export FUNKEY_IROH_INBOX
+export FUNKEY_IROH_BUNDLE_INBOX
+export FUNKEY_IROH_LIBRARY
+export FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
+export FUNKEY_IROH_MAX_BUNDLE_BYTES=${FUNKEY_IROH_MAX_BUNDLE_BYTES:-17179869184}
+export FUNKEY_IROH_MAX_BUNDLE_FILES=${FUNKEY_IROH_MAX_BUNDLE_FILES:-4096}
+export FUNKEY_IROH_MAX_INCOMING_CONNECTIONS=${FUNKEY_IROH_MAX_INCOMING_CONNECTIONS:-4}
+export FUNKEY_IROH_HANDSHAKE_TIMEOUT=${FUNKEY_IROH_HANDSHAKE_TIMEOUT:-15}
+export FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
+
+release_endpoint_lock()
+{
+    if [ -r "$LOCK_PID" ]; then
+        owner=
+        IFS= read -r owner < "$LOCK_PID" || owner=
+        [ "$owner" = "$$" ] || return 0
+    fi
+    rm -rf "$LOCK_DIR"
+}
+
+acquire_endpoint_lock()
+{
+    mkdir -p "$FUNKEY_IROH_STATE_DIR"
+    attempts=0
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        owner=
+        [ -r "$LOCK_PID" ] && IFS= read -r owner < "$LOCK_PID"
+        case "$owner" in
+            ''|*[!0-9]*)
+                rm -rf "$LOCK_DIR"
+                ;;
+            *)
+                if ! kill -0 "$owner" 2>/dev/null; then
+                    rm -rf "$LOCK_DIR"
+                fi
+                ;;
+        esac
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 30 ]; then
+            echo "funkey-iroh-service: another endpoint command holds $LOCK_DIR" >&2
+            return 75
+        fi
+        sleep 1
+    done
+    printf '%s\n' "$$" > "$LOCK_PID"
+    trap release_endpoint_lock EXIT INT TERM HUP
+}
+
+with_endpoint()
+{
+    acquire_endpoint_lock || return $?
+    was_running=0
+    if "$INIT" status >/dev/null 2>&1; then
+        was_running=1
+        "$INIT" stop || {
+            status=$?
+            release_endpoint_lock
+            return "$status"
+        }
+    fi
+
+    "$DAEMON" "$@"
+    command_status=$?
+
+    if [ "$was_running" -eq 1 ]; then
+        "$INIT" start || {
+            restart_status=$?
+            echo "funkey-iroh-service: command exited $command_status and receiver restart exited $restart_status" >&2
+            release_endpoint_lock
+            return "$restart_status"
+        }
+    fi
+    release_endpoint_lock
+    trap - EXIT INT TERM HUP
+    return "$command_status"
+}
+
+print_running_ticket()
+{
+    attempts=0
+    while [ ! -s "$TICKET_FILE" ]; do
+        if ! "$INIT" status >/dev/null 2>&1; then
+            echo "funkey-iroh-service: receiver stopped before publishing a ticket" >&2
+            return 1
+        fi
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 15 ]; then
+            echo "funkey-iroh-service: receiver did not publish a fresh ticket" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    cat "$TICKET_FILE"
+    printf '\n'
+}
+
+case "${1:-}" in
+    enable)
+        mkdir -p \
+            "$FUNKEY_IROH_STATE_DIR" \
+            "$FUNKEY_IROH_INBOX" \
+            "$FUNKEY_IROH_BUNDLE_INBOX" \
+            "$FUNKEY_IROH_LIBRARY"
+        : > "$ENABLE_FILE"
+        if [ ! -e "$USB_NETWORK_MARKER" ]; then
+            : > "$USB_NETWORK_MARKER"
+            echo "funkey-iroh-service: enabled persistent USB networking; reconnect or reboot if usb0 is not present" >&2
+        fi
+        "$INIT" start
+        ;;
+    disable)
+        "$INIT" stop || exit $?
+        rm -f "$ENABLE_FILE"
+        ;;
+    start|stop|restart|status)
+        exec "$INIT" "$1"
+        ;;
+    ticket)
+        if "$INIT" status >/dev/null 2>&1; then
+            print_running_ticket
+        else
+            with_endpoint ticket
+        fi
+        ;;
+    peer|peers|id|version|help|--help|-h|--version|-V)
+        exec "$DAEMON" "$@"
+        ;;
+    send)
+        shift
+        with_endpoint save send "$@"
+        ;;
+    bundle)
+        shift
+        case "${1:-}" in
+            send|push)
+                with_endpoint bundle "$@"
+                ;;
+            inspect|verify)
+                exec "$DAEMON" bundle "$@"
+                ;;
+            *)
+                echo "Usage: $0 bundle {send|inspect} ..." >&2
+                exit 64
+                ;;
+        esac
+        ;;
+    netplay)
+        shift
+        with_endpoint netplay "$@"
+        ;;
+    library)
+        shift
+        exec "$LIBRARY_TOOL" "$@"
+        ;;
+    run)
+        shift
+        [ "$#" -gt 0 ] || {
+            echo "Usage: $0 run FUNKEY_IROH_ARGUMENT..." >&2
+            exit 64
+        }
+        with_endpoint "$@"
+        ;;
+    logs)
+        lines=${2:-100}
+        case "$lines" in
+            ''|*[!0-9]*) echo "lines must be an integer" >&2; exit 64 ;;
+        esac
+        tail -n "$lines" "$LOG_FILE"
+        ;;
+    inbox)
+        {
+            find "$FUNKEY_IROH_INBOX" -maxdepth 5 -type f 2>/dev/null
+            find "$FUNKEY_IROH_BUNDLE_INBOX" -type d -name '*.funkey' 2>/dev/null
+        } | sort
+        ;;
+    *)
+        cat >&2 <<EOF
+Usage: $0 COMMAND [ARGS]
+
+Commands:
+  enable                         Enable and start the paired receiver
+  disable                        Stop and disable the receiver
+  start|stop|restart|status      Control the receiver
+  ticket                         Print the current pairing ticket
+  peer add|list|remove ...       Manage paired endpoint identities
+  send PEER SYSTEM GAME FILE     Send one progress file
+  bundle send PEER BUNDLE        Send a complete portable game bundle
+  bundle inspect BUNDLE          Verify and list a local portable bundle
+  library COMMAND ...            Adopt, refresh, send, or install games
+  netplay host|join ...          Run a UDP tunnel
+  run ARGS...                    Run another endpoint command safely
+  logs [LINES]                   Show receiver logs
+  inbox                          List received files and bundles
+EOF
+        exit 64
+        ;;
+esac

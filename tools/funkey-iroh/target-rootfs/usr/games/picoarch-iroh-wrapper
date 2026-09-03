@@ -1,0 +1,39 @@
+#!/bin/sh
+set -u
+
+REAL=${FUNKEY_PICOARCH_REAL:-/usr/games/picoarch.real}
+LIBRARY_TOOL=${FUNKEY_IROH_LIBRARY_TOOL:-/usr/bin/funkey-iroh-library}
+STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+LOG_FILE=$STATE_DIR/lifecycle.log
+
+[ -x "$REAL" ] || {
+    echo "picoarch wrapper: missing $REAL" >&2
+    exit 127
+}
+
+"$REAL" "$@" &
+child=$!
+
+forward_signal()
+{
+    signal=$1
+    kill "-$signal" "$child" 2>/dev/null || true
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+
+wait "$child"
+status=$?
+
+if [ "$#" -ge 2 ] && [ -x "$LIBRARY_TOOL" ]; then
+    core=$1
+    content=$2
+    (
+        mkdir -p "$STATE_DIR"
+        sync
+        "$LIBRARY_TOOL" after-game "$core" "$content"
+    ) >> "$LOG_FILE" 2>&1 &
+fi
+
+exit "$status"

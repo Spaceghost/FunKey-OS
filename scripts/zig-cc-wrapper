@@ -129,15 +129,19 @@ for arg in "$@"; do
 		-Wl,-T|-Wl,-Ttext)
 			args+=("$arg")
 			next_is_linker_value=true ;;
-		--target=arm-linux|--gcc-toolchain=*|--prefix=*)
+		--target=arm-linux|--target=armv7-unknown-linux-musleabihf|--target=arm-unknown-linux-musleabihf|--target=armv7-linux-musleabihf|--gcc-toolchain=*|--prefix=*)
+			# cc-rs forwards Rust target triples to the selected C compiler.
+			# This wrapper already selects the canonical Zig target below, so
+			# discard both Buildroot's legacy spelling and Rust's ARMv7 spelling
+			# instead of passing two incompatible target options to Zig.
 			;;
 		--gc-sections|--no-dynamic-linker|-Bstatic)
 			args+=("-Wl,$arg") ;;
 		-Ttext)
 			args+=("-Wl,-Ttext")
 			next_is_linker_value=true ;;
-		-Wl,-Map,*)
-			;;
+		-Wl,-Map,*|-Wl,-Map=*)
+			args+=("$arg") ;;
 		-Wl,-stats)
 			;;
 		-Wl,*,-stats,-lc)
@@ -163,7 +167,9 @@ for arg in "$@"; do
 			args+=("-Oz") ;;
 		-Qunused-arguments)
 			;;
-		-mapcs|-mno-sched-prolog|-mno-thumb-interwork|-mno-single-pic-base|-march=armv5t|-march=armv7-a+neon-vfpv4|-mcpu=cortex_a7|-mtune=cortex-a7|-mtune=generic-armv7-a|-mvectorize-with-neon-quad|-mfpu=*|-mfloat-abi=*|-msoft-float|-fstack-usage|-flto|-flto=*)
+		-mapcs|-mno-sched-prolog|-mno-thumb-interwork|-mno-single-pic-base|-march=armv5t|-march=armv7-a+neon-vfpv4|-mcpu=cortex_a7|-mcpu=cortex-a7|-mtune=cortex-a7|-mtune=generic-armv7-a|-mvectorize-with-neon-quad|-mfpu=*|-mfloat-abi=*|-msoft-float|-fstack-usage|-flto|-flto=*)
+			# Normalize/consume legacy GCC ARM tuning flags. The canonical Zig
+			# target and CPU are appended exactly once below.
 			;;
 		-nostdinc)
 			use_sysroot_headers=false

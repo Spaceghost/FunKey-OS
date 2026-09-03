@@ -1,0 +1,309 @@
+name: Release RG Nano firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer tag to create, for example v2.4.0-rc.1
+        required: true
+        type: string
+      ref:
+        description: Commit or branch already merged into master
+        required: true
+        default: master
+        type: string
+      hardware_run_id:
+        description: Successful FunKey Iroh hardware-loop run ID
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: true
+        default: true
+        type: boolean
+      confirmation:
+        description: Type RELEASE_RG_NANO
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rg-nano-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-verify:
+    outputs:
+      release_sha: ${{ steps.source.outputs.release_sha }}
+      release_tree: ${{ steps.source.outputs.release_tree }}
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04
+    timeout-minutes: 240
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      FORCE_UNSAFE_CONFIGURE: "1"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target/funkey-iroh
+      RELEASE_TAG: ${{ inputs.version }}
+
+    steps:
+      - name: Validate release request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.confirmation }}" == RELEASE_RG_NANO ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
+
+      - name: Install Focal build dependencies
+        run: |
+          apt-get update
+          apt-get install -y -q --no-install-recommends \
+            bash bc binutils build-essential busybox bzip2 ca-certificates cmake \
+            cpio curl cvs dash expect file gawk git gzip liblscp-dev \
+            libncurses5-dev libsdl1.2-dev locales mercurial openssh-client patch \
+            perl procps python3 python3-dev python3-distutils python3-setuptools \
+            rsync subversion tar unzip wget xxd xz-utils
+          ln -sfn /usr/bin/python3 /usr/local/bin/python
+          locale-gen en_US.UTF-8
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Require the release commit to be on master
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch origin master --tags
+          git merge-base --is-ancestor HEAD origin/master
+          test -f tools/funkey-iroh/Cargo.lock
+          git diff --exit-code
+          git diff --cached --exit-code
+          release_sha=$(git rev-parse HEAD)
+          release_tree=$(git rev-parse 'HEAD^{tree}')
+          printf 'release_sha=%s\n' "$release_sha" >> "$GITHUB_ENV"
+          printf 'release_tree=%s\n' "$release_tree" >> "$GITHUB_ENV"
+          printf 'release_sha=%s\n' "$release_sha" >> "$GITHUB_OUTPUT"
+          printf 'release_tree=%s\n' "$release_tree" >> "$GITHUB_OUTPUT"
+          printf 'firmware_version=%s\n' "${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: arm-unknown-linux-musleabihf
+
+      - name: Download required hardware evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: FunKey Iroh hardware evidence
+          path: hardware-evidence
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.hardware_run_id }}
+
+      - name: Validate successful hardware run and exact source tree
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HARDWARE_RUN_ID: ${{ inputs.hardware_run_id }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$HARDWARE_RUN_ID" \
+            > hardware-run.json
+          python3 - hardware-run.json <<'PY'
+          import json, sys
+          run = json.load(open(sys.argv[1]))
+          assert run["conclusion"] == "success", run.get("conclusion")
+          assert run["path"] == ".github/workflows/iroh-hardware-loop.yml", run.get("path")
+          PY
+
+          evidence=$(find hardware-evidence -type f -name 'HIL-EVIDENCE.env' -print -quit)
+          test -n "$evidence"
+          python3 - "$evidence" "$GITHUB_REPOSITORY" "$HARDWARE_RUN_ID" "$release_tree" <<'PY'
+          import pathlib, sys
+          values = {}
+          for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+              if not line or line.startswith("#"):
+                  continue
+              key, value = line.split("=", 1)
+              values[key] = value
+          assert values["repository"] == sys.argv[2]
+          assert values["hardware_run_id"] == sys.argv[3]
+          assert values["source_tree"] == sys.argv[4], (values["source_tree"], sys.argv[4])
+          required = [
+              "ui_self_test", "library_self_test", "sftp_roundtrip",
+              "bundle_host_to_device", "bundle_device_to_host",
+              "bundle_duplicate_skip", "bundle_conflict_preservation",
+              "savestate_roundtrip",
+          ]
+          assert all(values.get(key) == "passed" for key in required), values
+          PY
+
+          find hardware-evidence -type f -name '*-normal-status.txt' -print -quit | grep -q .
+          find hardware-evidence -type f -name '*-device-self-test.log' -print -quit | grep -q .
+          find hardware-evidence -type f -name '*-host-to-device.log' -print -quit | grep -q .
+          find hardware-evidence -type f -name '*-device-to-host.log' -print -quit | grep -q .
+          duplicate=$(find hardware-evidence -type f -name '*-duplicate.log' -print -quit)
+          conflict=$(find hardware-evidence -type f -name '*-conflict.log' -print -quit)
+          test -n "$duplicate" -a -n "$conflict"
+          grep -q 'already present' "$duplicate"
+          grep -q 'stored bundle conflict' "$conflict"
+          if grep -R -E 'ACTION FAILED|self-test: FAIL|flash-failed' hardware-evidence; then
+            echo 'hardware evidence contains a failure marker' >&2
+            exit 1
+          fi
+
+      - name: Test native transport and UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked \
+            --bin funkey-iroh
+          cargo test \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked
+          test -x .cargo-target/funkey-iroh/debug/funkey-iroh
+          cc -std=gnu99 -O2 -Wall -Wextra -Werror \
+            $(sdl-config --cflags) \
+            tools/funkey-iroh-ui/main.c \
+            $(sdl-config --libs) \
+            -o .cargo-target/funkey-iroh-ui-native
+          ./scripts/test-iroh-portability \
+            .cargo-target/funkey-iroh/debug/funkey-iroh \
+            .cargo-target/funkey-iroh-ui-native
+
+      - name: Build release profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          export FUNKEY_VERSION="$firmware_version"
+          make -j"$(nproc)" zig-all
+          ./scripts/build-usb-network-variant "$firmware_version"
+          ./scripts/build-iroh-variant "$firmware_version" iroh
+
+      - name: Assemble release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp \
+            images/FunKey-rootfs-"$firmware_version".fwu \
+            images/FunKey-sdcard-"$firmware_version".img.xz \
+            images/SHA256SUMS-"$firmware_version".txt \
+            images/FunKey-rootfs-"$firmware_version"-network-only.fwu \
+            images/FunKey-sdcard-"$firmware_version"-network-only.img.xz \
+            images/SHA256SUMS-"$firmware_version"-network-only.txt \
+            images/FunKey-rootfs-"$firmware_version"-iroh.fwu \
+            images/FunKey-sdcard-"$firmware_version"-iroh.img.xz \
+            images/SHA256SUMS-"$firmware_version"-iroh.txt \
+            images/packages-Firmware-size-"$firmware_version".json \
+            images/packages-Firmware-size-"$firmware_version".txt \
+            images/packages-Firmware-size-"$firmware_version"-network-only.json \
+            images/packages-Firmware-size-"$firmware_version"-network-only.txt \
+            images/packages-Firmware-size-"$firmware_version"-iroh.json \
+            images/packages-Firmware-size-"$firmware_version"-iroh.txt \
+            images/iroh-"$firmware_version"-iroh.json \
+            release-assets/
+
+          if find release-assets -type f -name '*usb-debug*' -print -quit | grep -q .; then
+            echo 'debug firmware must never be a public release asset' >&2
+            exit 1
+          fi
+
+          (
+            cd release-assets
+            sha256sum * > SHA256SUMS-ALL.txt
+          )
+          cat > release-assets/RELEASE-EVIDENCE.txt <<EOF
+          tag=$RELEASE_TAG
+          commit=$release_sha
+          hardware_run_id=${{ inputs.hardware_run_id }}
+          native_tests=passed
+          arm_build=passed
+          recovery_flash_cycle=passed
+          sftp_roundtrip=passed
+          bundle_roundtrip=passed
+          conflict_preservation=passed
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RG Nano release ${{ inputs.version }}
+          if-no-files-found: error
+          path: |
+            release-assets/
+            hardware-evidence/
+
+  publish:
+    needs: build-and-verify
+    runs-on: ubuntu-24.04
+    environment: rg-nano-release
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build-and-verify.outputs.release_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: RG Nano release ${{ inputs.version }}
+          path: candidate
+
+      - name: Create annotated tag and GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.confirmation }}" == RELEASE_RG_NANO ]]
+          git fetch origin master --tags
+          git merge-base --is-ancestor HEAD origin/master
+          test "$(git rev-parse 'HEAD^{tree}')" = "${{ needs.build-and-verify.outputs.release_tree }}"
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "tag already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          evidence=candidate/release-assets/RELEASE-EVIDENCE.txt
+          test -s "$evidence"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$RELEASE_TAG" -F "$evidence"
+          git push origin "$RELEASE_TAG"
+
+          args=(
+            release create "$RELEASE_TAG"
+            candidate/release-assets/*
+            --verify-tag
+            --title "FunKey-OS RG Nano $RELEASE_TAG"
+            --notes-file "$evidence"
+          )
+          if [[ "${{ inputs.prerelease }}" == true ]]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+          gh "${args[@]}"

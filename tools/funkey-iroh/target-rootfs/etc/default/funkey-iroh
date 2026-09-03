@@ -1,0 +1,19 @@
+# Persistent state and user-visible portable game library on the writable FAT partition.
+FUNKEY_IROH_STATE_DIR=/mnt/.funkey-iroh
+FUNKEY_IROH_INBOX=/mnt/.funkey-iroh/inbox
+FUNKEY_IROH_BUNDLE_INBOX=/mnt/.funkey-iroh/bundle-inbox
+FUNKEY_IROH_LIBRARY="/mnt/FunKey/Shared Games"
+FUNKEY_IROH_PAIRING_DIR=/mnt/FunKey/Pairing
+
+# Transfer, handshake, and low-memory receiver safety ceilings.
+FUNKEY_IROH_MAX_SAVE_BYTES=67108864
+FUNKEY_IROH_MAX_BUNDLE_BYTES=17179869184
+FUNKEY_IROH_MAX_BUNDLE_FILES=4096
+FUNKEY_IROH_MAX_INCOMING_CONNECTIONS=4
+FUNKEY_IROH_HANDSHAKE_TIMEOUT=15
+FUNKEY_IROH_ONLINE_TIMEOUT=8
+FUNKEY_IROH_LOG_MAX_BYTES=1048576
+
+# Paired-only is the release default. Additional daemon arguments may be
+# supplied for supervised debugging, for example --allow-unpaired.
+FUNKEY_IROH_SERVICE_ARGS=serve
