@@ -49,17 +49,24 @@ jobs:
             printf '  %s\n' "${conflicts[@]}"
             for path in "${conflicts[@]}"; do
               case "$path" in
-                .gitignore|.gitmodules|FunKey/Config.in)
+                .gitmodules|FunKey/Config.in|\
+                FunKey/board/funkey/rootfs-overlay/usr/local/sbin/first_boot|\
+                FunKey/board/funkey/update_partition|\
+                FunKey/configs/funkey_defconfig|\
+                FunKey/package/commander/commander.mk|\
+                FunKey/package/gmenu2x/gmenu2x.mk|\
+                FunKey/package/retrofe/retrofe.mk|\
+                README.md|\
+                Recovery/board/funkey/rootfs-overlay/etc/init.d/S60recovery|\
+                genimage.cfg|genimage-prod.cfg)
                   git checkout --ours -- "$path"
                   ;;
-                buildroot|FunKey/board/funkey/rootfs-overlay/usr/games/*)
+                buildroot|\
+                FunKey/board/funkey/rootfs-overlay/usr/games/*|\
+                FunKey/board/funkey/rootfs-overlay/usr/local/share/OPKs/Settings/poweroff_funkey-s.opk|\
+                FunKey/board/funkey/rootfs-overlay/usr/local/share/OPKs/Settings/reboot_funkey-s.opk|\
+                FunKey/board/funkey/rootfs-overlay/usr/local/share/funkey_files.zip)
                   git checkout --theirs -- "$path"
-                  ;;
-                FunKey/board/funkey/rootfs-overlay/etc/fstab|FunKey/board/funkey/rootfs-overlay/root/.profile)
-                  # These are currently byte-identical on both tips. Keep the
-                  # RG Nano side explicitly so a future accidental difference
-                  # is visible in review rather than selected by rename logic.
-                  git checkout --ours -- "$path"
                   ;;
                 *)
                   printf 'Unrecognized upstream conflict: %s\n' "$path" >&2
@@ -89,7 +96,7 @@ jobs:
           git add -A
           git commit \
             -m 'Merge upstream master into the RG Nano release line' \
-            -m 'Preserve the RG Nano build/debug additions while incorporating the 54 upstream commits through 6739391. Use upstream’s newer Buildroot pin and frontend/game content; keep the RG Nano ccache, branch-tracking, and gmu configuration.'
+            -m 'Preserve the RG Nano build/debug additions while incorporating the 54 upstream commits through 6739391. Use upstream’s newer Buildroot pin and frontend/game content; keep the RG Nano ccache, branch-tracking, compact image layout, deterministic package pins, and recovery/update diagnostics.'
 
           merge_component() {
             local ref=$1 message=$2
