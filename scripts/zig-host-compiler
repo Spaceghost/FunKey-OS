@@ -32,6 +32,16 @@ for arg in "$@"; do
 	fi
 done
 
+# Cached host tools must run on any runner of the same architecture. Zig's
+# native default may use instructions available on the machine compiling the
+# cache but absent from the machine restoring it, so select an architecture
+# baseline and discard caller-supplied CPU tuning whenever one is known.
+portable_cpu_args=()
+case "$(uname -m)" in
+	x86_64) portable_cpu_args=(-march=x86_64) ;;
+	aarch64|arm64) portable_cpu_args=(-mcpu=generic) ;;
+esac
+
 # Old libtool releases pass GNU ld scripts as bare compiler-driver inputs.
 # GCC recognizes those implicitly, while Zig/Clang requires an explicit -T.
 args=()
@@ -39,6 +49,10 @@ boundary_section_link=false
 for arg in "$@"; do
 	case "$arg" in
 		*imagetool.o|*file2alias.o) boundary_section_link=true; args+=("$arg") ;;
+		-march=*|-mcpu=*|-mtune=*)
+			if [ "${#portable_cpu_args[@]}" -eq 0 ]; then
+				args+=("$arg")
+			fi ;;
 		-Wl,-stats) ;;
 		-Wl,-h*)
 			args+=("-Wl,-soname" "-Wl,${arg#-Wl,-h}") ;;
@@ -61,7 +75,7 @@ if $boundary_section_link; then
 	args+=("-Wl,--no-gc-sections")
 fi
 
-exec zig "$driver" "${args[@]}" \
+exec zig "$driver" "${args[@]}" "${portable_cpu_args[@]}" \
 	-Wno-error=date-time \
 	-Wno-error=incompatible-function-pointer-types \
 	-Wno-error=implicit-function-declaration \
