@@ -88,7 +88,43 @@ typedef struct {
 
 static Ui ui;
 
+/*
+ * UI strings are deliberately clipped to fixed display buffers. Keep printf
+ * format checking, but perform the bounded write behind one wrapper so GCC's
+ * fortify diagnostics do not mistake intentional clipping for an overflow.
+ */
+static int bounded_snprintf(char *destination, size_t size,
+                            const char *format, ...)
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 3, 4)))
+#endif
+    ;
+
+static int bounded_snprintf(char *destination, size_t size,
+                            const char *format, ...)
+{
+    va_list arguments;
+    int result;
+
+    va_start(arguments, format);
+    result = vsnprintf(destination, size, format, arguments);
+    va_end(arguments);
+    if (size > 0 && result < 0) {
+        destination[0] = '\0';
+    }
+    return result;
+}
+
+/* Shared fragments may use this helper in other build combinations. */
+#if defined(__GNUC__) || defined(__clang__)
+static int file_exists(const char *path) __attribute__((unused));
+#else
+static int file_exists(const char *path);
+#endif
+
+#define snprintf bounded_snprintf
 #include "ui-core.inc"
 #include "ui-qr.inc"
 #include "ui-settings.inc"
 #include "ui-launch.inc"
+#undef snprintf
