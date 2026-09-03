@@ -2,41 +2,149 @@
 
 USB_NETWORK_SYSFS_ROOT=${USB_NETWORK_SYSFS_ROOT:-/sys}
 USB_NETWORK_GADGET_ROOT=${USB_NETWORK_GADGET_ROOT:-/sys/kernel/config/usb_gadget/FunKey}
+USB_NETWORK_INTERFACE=${USB_NETWORK_INTERFACE:-usb0}
+USB_NETWORK_DEVICE_ADDRESS=${USB_NETWORK_DEVICE_ADDRESS:-192.168.137.2}
+USB_NETWORK_HOST_ADDRESS=${USB_NETWORK_HOST_ADDRESS:-192.168.137.1}
+USB_NETWORK_SSH_PORT=${USB_NETWORK_SSH_PORT:-22}
+USB_NETWORK_SSH_CHAIN=${USB_NETWORK_SSH_CHAIN:-FUNKEY_USB_SSH}
+USB_NETWORK_IP=${USB_NETWORK_IP:-ip}
+USB_NETWORK_IPTABLES=${USB_NETWORK_IPTABLES:-iptables}
 
-usb_network_is_enabled() {
-	[ -e "$USB_NETWORK_SYSFS_ROOT/class/net/usb0" ]
+usb_network_command_exists()
+{
+    case "$1" in
+        */*) [ -x "$1" ] ;;
+        *) command -v "$1" >/dev/null 2>&1 ;;
+    esac
+}
+
+usb_network_is_enabled()
+{
+    [ -e "$USB_NETWORK_SYSFS_ROOT/class/net/$USB_NETWORK_INTERFACE" ]
 }
 
 # A powered cable is not enough: the USB device controller reaches
-# "configured" only after a data host has enumerated the gadget.  This
+# "configured" only after a data host has enumerated the gadget. This
 # controller leaves that state stale after disconnect, but resets its speed.
-usb_data_is_configured() {
-	local usb_speed usb_speed_path usb_state usb_state_path usb_udc
+usb_data_is_configured()
+{
+    local usb_speed usb_speed_path usb_state usb_state_path usb_udc
 
-	[ -r "$USB_NETWORK_GADGET_ROOT/UDC" ] || return 1
-	usb_udc=
-	IFS= read -r usb_udc < "$USB_NETWORK_GADGET_ROOT/UDC" || return 1
-	[ -n "$usb_udc" ] || return 1
-	usb_state_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/state"
-	[ -r "$usb_state_path" ] || return 1
-	usb_state=
-	IFS= read -r usb_state < "$usb_state_path" || return 1
-	[ "$usb_state" = configured ] || return 1
+    [ -r "$USB_NETWORK_GADGET_ROOT/UDC" ] || return 1
+    usb_udc=
+    IFS= read -r usb_udc < "$USB_NETWORK_GADGET_ROOT/UDC" || return 1
+    [ -n "$usb_udc" ] || return 1
+    usb_state_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/state"
+    [ -r "$usb_state_path" ] || return 1
+    usb_state=
+    IFS= read -r usb_state < "$usb_state_path" || return 1
+    [ "$usb_state" = configured ] || return 1
 
-	usb_speed_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/current_speed"
-	[ -r "$usb_speed_path" ] || return 1
-	usb_speed=
-	IFS= read -r usb_speed < "$usb_speed_path" || return 1
-	case "$usb_speed" in
-		low-speed|full-speed|high-speed|wireless|super-speed|super-speed-plus)
-			return 0
-			;;
-		*)
-			return 1
-			;;
-	esac
+    usb_speed_path="$USB_NETWORK_SYSFS_ROOT/class/udc/$usb_udc/current_speed"
+    [ -r "$usb_speed_path" ] || return 1
+    usb_speed=
+    IFS= read -r usb_speed < "$usb_speed_path" || return 1
+    case "$usb_speed" in
+        low-speed|full-speed|high-speed|wireless|super-speed|super-speed-plus)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
-usb_network_is_ready() {
-	usb_network_is_enabled && usb_data_is_configured
+usb_network_is_ready()
+{
+    usb_network_is_enabled && usb_data_is_configured
+}
+
+usb_network_host_mac()
+{
+    local host_addr mac
+
+    for host_addr in "$USB_NETWORK_GADGET_ROOT"/functions/*.usb0/host_addr; do
+        [ -r "$host_addr" ] || continue
+        mac=
+        IFS= read -r mac < "$host_addr" || continue
+        if printf '%s\n' "$mac" |
+           grep -Eq '^[[:xdigit:]]{2}(:[[:xdigit:]]{2}){5}$'; then
+            printf '%s\n' "$mac" | tr 'A-F' 'a-f'
+            return 0
+        fi
+    done
+    return 1
+}
+
+usb_network_has_device_address()
+{
+    usb_network_command_exists "$USB_NETWORK_IP" || return 1
+    "$USB_NETWORK_IP" -4 addr show dev "$USB_NETWORK_INTERFACE" 2>/dev/null |
+        grep -Eq "[[:space:]]inet[[:space:]]+$USB_NETWORK_DEVICE_ADDRESS/"
+}
+
+usb_network_wait_for_device_address()
+{
+    local attempt limit
+
+    limit=${1:-15}
+    attempt=0
+    while ! usb_network_has_device_address; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt "$limit" ] || return 1
+        sleep 1
+    done
+}
+
+usb_network_pin_host_neighbor()
+{
+    local host_mac
+
+    host_mac=$1
+    usb_network_command_exists "$USB_NETWORK_IP" || return 1
+    "$USB_NETWORK_IP" neigh del "$USB_NETWORK_HOST_ADDRESS" \
+        dev "$USB_NETWORK_INTERFACE" 2>/dev/null || :
+    "$USB_NETWORK_IP" neigh add "$USB_NETWORK_HOST_ADDRESS" \
+        lladdr "$host_mac" nud permanent dev "$USB_NETWORK_INTERFACE"
+}
+
+# Bind identity at both layers. A transparent L2 bridge preserves source MAC,
+# so bridged peers keep their own MAC and hit the final DROP. The direct host
+# is the only endpoint assigned the gadget host MAC and the only usable peer
+# address in the /30.
+usb_network_install_ssh_guard()
+{
+    local host_mac
+
+    case "$USB_NETWORK_SSH_PORT" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$USB_NETWORK_SSH_PORT" -ge 1 ] &&
+        [ "$USB_NETWORK_SSH_PORT" -le 65535 ] || return 1
+    usb_network_command_exists "$USB_NETWORK_IPTABLES" || return 1
+    host_mac=$(usb_network_host_mac) || return 1
+    usb_network_wait_for_device_address 15 || return 1
+    usb_network_pin_host_neighbor "$host_mac" || return 1
+
+    while "$USB_NETWORK_IPTABLES" -D INPUT -p tcp \
+        --dport "$USB_NETWORK_SSH_PORT" \
+        -j "$USB_NETWORK_SSH_CHAIN" 2>/dev/null; do
+        :
+    done
+
+    "$USB_NETWORK_IPTABLES" -F "$USB_NETWORK_SSH_CHAIN" 2>/dev/null ||
+        "$USB_NETWORK_IPTABLES" -N "$USB_NETWORK_SSH_CHAIN" || return 1
+
+    # Build the custom chain fail-closed before exposing it from INPUT.
+    "$USB_NETWORK_IPTABLES" -A "$USB_NETWORK_SSH_CHAIN" -j DROP || return 1
+    "$USB_NETWORK_IPTABLES" -I "$USB_NETWORK_SSH_CHAIN" 1 \
+        -i "$USB_NETWORK_INTERFACE" \
+        -s "$USB_NETWORK_HOST_ADDRESS" \
+        -d "$USB_NETWORK_DEVICE_ADDRESS" \
+        -p tcp --dport "$USB_NETWORK_SSH_PORT" \
+        -m mac --mac-source "$host_mac" \
+        -j ACCEPT || return 1
+    "$USB_NETWORK_IPTABLES" -I INPUT 1 -p tcp \
+        --dport "$USB_NETWORK_SSH_PORT" \
+        -j "$USB_NETWORK_SSH_CHAIN" || return 1
 }

@@ -1,7 +1,6 @@
 #!/bin/sh
-#
-# Starts dropbear sshd.
-#
+# Start Dropbear only after the direct USB host is pinned and the bridge-safe
+# source-MAC/IP firewall gate has been installed.
 
 SELF=$(basename "$0")
 . /usr/local/lib/usb_network
@@ -15,8 +14,10 @@ command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
 command -v usb_debug_run >/dev/null 2>&1 ||
     usb_debug_run() { shift; "$@"; }
 
-# Allow a few customizations from a config file.
 test -r /etc/default/dropbear && . /etc/default/dropbear
+DROPBEAR_ARGS=${DROPBEAR_ARGS:-"-s -g"}
+DROPBEAR_BIND_ADDRESS=${DROPBEAR_BIND_ADDRESS:-$USB_NETWORK_DEVICE_ADDRESS}
+DROPBEAR_PORT=${DROPBEAR_PORT:-$USB_NETWORK_SSH_PORT}
 
 run_dropbear_daemon()
 {
@@ -29,38 +30,70 @@ run_dropbear_daemon()
     fi
 }
 
+dropbear_arguments_are_safe()
+{
+    local argument
+
+    for argument in $DROPBEAR_ARGS; do
+        case "$argument" in
+            -p|-p*)
+                echo "dropbear: -p is managed by the USB isolation layer" >&2
+                return 1
+                ;;
+        esac
+    done
+}
+
+prepare_authorized_keys()
+{
+    # The shared partition is the only persistent writable filesystem. A key
+    # may be provisioned as /authorized_keys from the USB mass-storage side;
+    # after one boot its canonical location is FunKey/.ssh/authorized_keys.
+    mkdir -p /mnt/FunKey/.ssh
+    if [ -r /mnt/authorized_keys ] &&
+       [ ! -s /mnt/FunKey/.ssh/authorized_keys ]; then
+        cp /mnt/authorized_keys /mnt/FunKey/.ssh/authorized_keys
+    fi
+}
+
 start()
 {
     if ! usb_network_is_ready; then
         usb_debug_log dropbear "start skipped because usb0 is not configured"
         return 0
     fi
+    if ! dropbear_arguments_are_safe; then
+        usb_debug_log dropbear "refusing unsafe listen arguments"
+        return 1
+    fi
 
-    DROPBEAR_ARGS="$DROPBEAR_ARGS -R"
+    USB_NETWORK_DEVICE_ADDRESS=$DROPBEAR_BIND_ADDRESS
+    USB_NETWORK_SSH_PORT=$DROPBEAR_PORT
+    export USB_NETWORK_DEVICE_ADDRESS USB_NETWORK_SSH_PORT
+    if ! usb_network_install_ssh_guard; then
+        echo "dropbear: USB host isolation failed; refusing to start" >&2
+        usb_debug_log dropbear "host isolation failed; daemon not started"
+        return 1
+    fi
 
-    # If /etc/dropbear is a symlink to /var/run/dropbear, and
-    #   - the filesystem is RO, create the target directory;
-    #   - the filesystem is RW, replace the symlink with a real directory.
+    prepare_authorized_keys
+    DROPBEAR_RUNTIME_ARGS="$DROPBEAR_ARGS -R -p $DROPBEAR_BIND_ADDRESS:$DROPBEAR_PORT"
+
+    # If /etc/dropbear points at /var/run/dropbear, create its volatile target.
     if [ -L /etc/dropbear ] &&
        [ "$(readlink /etc/dropbear)" = "/var/run/dropbear" ]; then
-        if rm -f /etc/dropbear >/dev/null 2>&1; then
-            mkdir -p /etc/dropbear
-        else
-            echo "No persistent location to store SSH host keys. New keys will be"
-            echo "generated at each boot. Are you sure this is what you want to do?"
-            mkdir -p "$(readlink /etc/dropbear)"
-        fi
+        mkdir -p /var/run/dropbear
     fi
 
     printf "Starting dropbear sshd: "
     umask 077
-
     run_dropbear_daemon dropbear-daemon-start \
         start-stop-daemon -S -q -o -p /var/run/dropbear.pid \
-        --exec /usr/sbin/dropbear -- $DROPBEAR_ARGS
+        --exec /usr/sbin/dropbear -- $DROPBEAR_RUNTIME_ARGS
     daemon_status=$?
     [ "$daemon_status" -eq 0 ] && echo "OK" || echo "FAIL"
-    usb_debug_log dropbear "start status=$daemon_status args=$DROPBEAR_ARGS"
+    usb_debug_log dropbear \
+        "start status=$daemon_status bind=$DROPBEAR_BIND_ADDRESS:$DROPBEAR_PORT"
     return "$daemon_status"
 }
 
@@ -72,27 +105,19 @@ stop()
     daemon_status=$?
     [ "$daemon_status" -eq 0 ] && echo "OK" || echo "FAIL"
     usb_debug_log dropbear "stop status=$daemon_status"
+    # Leave the INPUT gate installed: stopped remains closed.
     return "$daemon_status"
 }
 
-restart()
-{
-    stop
-    start
-}
-
-case "$1" in
-    start)
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart|reload)
+        stop
         start
         ;;
-    stop)
-        stop
-        ;;
-    restart|reload)
-        restart
-        ;;
     *)
-        echo "Usage: $0 {start|stop|restart}"
+        echo "Usage: $0 {start|stop|restart}" >&2
         exit 1
         ;;
 esac
