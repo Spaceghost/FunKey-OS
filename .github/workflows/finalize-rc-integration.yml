@@ -89,7 +89,11 @@ jobs:
 
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends busybox dash
-          ./scripts/test-iroh-ui
+          test_runtime="$RUNNER_TEMP/funkey-iroh-runtime"
+          mkdir -p "$test_runtime"
+          FUNKEY_IROH_RUNTIME_DIR="$test_runtime" \
+          FUNKEY_IROH_ENDPOINT_LOCK="$RUNNER_TEMP/funkey-iroh-endpoint.lock" \
+            ./scripts/test-iroh-ui
 
           grep -q 'augment-iroh-ui-rootfs.*prepare' scripts/build-iroh-variant
           grep -q 'augment-iroh-ui-rootfs.*verify' scripts/build-iroh-variant
