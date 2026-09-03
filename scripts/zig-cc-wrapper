@@ -140,8 +140,8 @@ for arg in "$@"; do
 		-Ttext)
 			args+=("-Wl,-Ttext")
 			next_is_linker_value=true ;;
-		-Wl,-Map,*)
-			;;
+		-Wl,-Map,*|-Wl,-Map=*)
+			args+=("$arg") ;;
 		-Wl,-stats)
 			;;
 		-Wl,*,-stats,-lc)
