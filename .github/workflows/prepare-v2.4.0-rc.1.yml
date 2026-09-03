@@ -87,12 +87,9 @@ jobs:
           git checkout "$original_rg" -- .gitignore .gitmodules FunKey/Config.in
           git checkout "$upstream" -- buildroot
           git add -A
-          git commit -m "Merge upstream master into the RG Nano release line
-
-Preserve the RG Nano build/debug additions while incorporating the 54
-upstream commits through 6739391. Use upstream's newer Buildroot pin and
-frontend/game content; keep the RG Nano ccache, branch-tracking, and gmu
-configuration."
+          git commit \
+            -m 'Merge upstream master into the RG Nano release line' \
+            -m 'Preserve the RG Nano build/debug additions while incorporating the 54 upstream commits through 6739391. Use upstream’s newer Buildroot pin and frontend/game content; keep the RG Nano ccache, branch-tracking, and gmu configuration.'
 
           merge_component() {
             local ref=$1 message=$2
@@ -104,8 +101,8 @@ configuration."
             git commit -m "$message"
           }
 
-          merge_component "$iroh" "Merge Iroh save, savestate, portable-library, SFTP, and transport support"
-          merge_component "$ui" "Merge the Iroh launcher UI and post-game synchronization flow"
+          merge_component "$iroh" 'Merge Iroh save, savestate, portable-library, SFTP, and transport support'
+          merge_component "$ui" 'Merge the Iroh launcher UI and post-game synchronization flow'
 
           git diff --check
           test "$(git merge-base "$upstream" HEAD)" = "$upstream"
