@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
           submodules: false
 
-      - name: Merge upstream, Iroh transport, and launcher UI
+      - name: Merge upstream and rebase the launcher UI
         shell: bash
         run: |
           set -euo pipefail
@@ -39,7 +39,7 @@ jobs:
           original_rg=$(git rev-parse origin/rg-nano-next)
           upstream=$(git rev-parse origin/master)
           iroh=$(git rev-parse origin/feature/iroh-save-netplay)
-          ui=$(git rev-parse origin/feature/iroh-launcher-ui)
+          ui_tip=$(git rev-parse origin/feature/iroh-launcher-ui)
           upstream_buildroot=$(git rev-parse "$upstream:buildroot")
           git checkout -B rc/v2.4.0-rc.1 "$original_rg"
 
@@ -77,100 +77,73 @@ jobs:
                   ;;
               esac
             done
-            if (( unknown != 0 )); then
-              return 1
-            fi
+            (( unknown == 0 )) || return 1
             git add -A -- . ':(exclude)buildroot'
             git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
-            if git diff --name-only --diff-filter=U | grep -q .; then
-              printf 'Unresolved paths remain:\n' >&2
-              git diff --name-only --diff-filter=U >&2
-              return 1
-            fi
+            ! git diff --name-only --diff-filter=U | grep -q .
           }
 
           if ! git merge --no-ff --no-commit "$upstream"; then
             resolve_upstream_conflicts
           fi
-
           git checkout "$original_rg" -- .gitignore .gitmodules FunKey/Config.in
           git add .gitignore .gitmodules FunKey/Config.in
           git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
           git commit \
             -m 'Merge upstream master into the RG Nano release line' \
-            -m 'Preserve the RG Nano build/debug additions while incorporating the 54 upstream commits through 6739391. Use upstream’s newer Buildroot pin and frontend/game content; keep the RG Nano ccache, branch-tracking, compact image layout, deterministic package pins, and recovery/update diagnostics.'
+            -m 'Preserve the RG Nano build/debug additions while incorporating upstream through 6739391. Use upstream’s newer Buildroot pin and generated frontend content; keep the RG Nano kernel, compact layout, deterministic packages, and recovery/update diagnostics.'
 
           if ! git merge --no-ff --no-commit "$iroh"; then
-            printf 'Unexpected conflicts while merging Iroh transport:\n' >&2
+            printf 'Unexpected conflicts while merging hardened Iroh:\n' >&2
             git diff --name-only --diff-filter=U >&2
             exit 1
           fi
-          git commit -m 'Merge Iroh save, savestate, portable-library, SFTP, and transport support'
+          git commit -m 'Merge hardened Iroh save, savestate, library, SFTP, and transport support'
 
-          resolve_ui_conflicts() {
-            local path unknown=0
-            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-            printf 'Launcher UI merge conflicts (%s):\n' "${#conflicts[@]}"
-            printf '  %s\n' "${conflicts[@]}"
-            for path in "${conflicts[@]}"; do
-              case "$path" in
-                .github/workflows/iroh.yml|\
-                scripts/build-iroh-variant|\
-                tools/funkey-iroh-ui/main.c|\
-                tools/funkey-iroh/target-rootfs/etc/default/funkey-iroh|\
-                tools/funkey-iroh/target-rootfs/etc/init.d/S44funkey-iroh|\
-                tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-service)
-                  # These are the six files deliberately advanced by the
-                  # stacked launcher branch. Its versions supersede the
-                  # transport-only scaffolding from PR #6.
-                  git checkout --theirs -- "$path"
-                  ;;
-                *)
-                  printf 'Unrecognized launcher conflict: %s\n' "$path" >&2
-                  unknown=1
-                  ;;
-              esac
-            done
-            if (( unknown != 0 )); then
-              return 1
-            fi
-            git add -- "${conflicts[@]}"
-            if git diff --name-only --diff-filter=U | grep -q .; then
-              printf 'Unresolved launcher paths remain:\n' >&2
+          # PR #8 contains five content patches followed by a no-content merge
+          # marker. Replay only the content patches on the hardened Iroh tip.
+          ui_commits=(
+            3aab69700c5d3bba126f70e753584abbb2aaff90
+            7fe0c45bf5bd2b15025a2098f122be42587898df
+            c744c91b313d629907900c8a3cdb17e85ce29346
+            b09de6c100898d9f4a94297718333fcfc2d62192
+            0210f3c3bfad91488db265dfecdadcb709a4aa64
+          )
+          for commit in "${ui_commits[@]}"; do
+            if ! git cherry-pick --empty=drop "$commit"; then
+              printf 'UI patch %s needs an explicit rebase resolution:\n' "$commit" >&2
               git diff --name-only --diff-filter=U >&2
-              return 1
+              exit 1
             fi
-          }
-
-          if ! git merge --no-ff --no-commit "$ui"; then
-            resolve_ui_conflicts
-          fi
-          git commit -m 'Merge the Iroh launcher UI and post-game synchronization flow'
+          done
 
           git diff --check
           test "$(git merge-base "$upstream" HEAD)" = "$upstream"
           test "$(git merge-base "$iroh" HEAD)" = "$iroh"
-          test "$(git merge-base "$ui" HEAD)" = "$ui"
           test "$(git rev-parse 'HEAD:buildroot')" = "$upstream_buildroot"
           test -f .github/workflows/release.yml
           test -f tools/funkey-iroh/Cargo.lock
           test -f tools/funkey-iroh-ui/main.c
           test -x scripts/build-iroh-firmware
           test -x scripts/test-iroh-portability
+          test -x scripts/test-iroh-ui
+          grep -q 'branches: \[rg-nano-next, master\]' .github/workflows/iroh.yml
+          grep -q 'iroh-usb-debug' scripts/build-iroh-firmware
 
           {
             echo "original_rg=$original_rg"
             echo "upstream=$upstream"
             echo "upstream_buildroot=$upstream_buildroot"
             echo "iroh=$iroh"
-            echo "ui=$ui"
+            echo "ui_original_tip=$ui_tip"
             echo "integration_commit=$(git rev-parse HEAD)"
             echo "integration_tree=$(git rev-parse 'HEAD^{tree}')"
             echo
-            git --no-pager log --oneline --decorate -8
+            git --no-pager log --oneline --decorate -12
           } | tee PREPARE-RC-REPORT.txt
 
-          git push origin HEAD:refs/heads/rc/v2.4.0-rc.1 --force-with-lease
+          git push origin HEAD:refs/heads/rc/v2.4.0-rc.1 \
+            --force-with-lease=refs/heads/rc/v2.4.0-rc.1:39dcaa2922d3283d9a3f12edad9ad96769549368
 
       - name: Upload integration report
         if: always()
