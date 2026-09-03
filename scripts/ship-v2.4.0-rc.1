@@ -1,0 +1,424 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo"
+
+RELEASE_TAG=${RELEASE_TAG:-v2.4.0-rc.1}
+RELEASE_VERSION=${RELEASE_VERSION:-${RELEASE_TAG#v}}
+UPSTREAM_COMMIT=${UPSTREAM_COMMIT:-6739391b2a7c564aef0fbf10c402e526e9149524}
+
+[[ "$RELEASE_TAG" == v2.4.0-rc.1 ]]
+[[ "$RELEASE_VERSION" == 2.4.0-rc.1 ]]
+
+python3 <<'PY'
+from pathlib import Path
+import re
+
+
+def set_config(path: str, key: str, value: str) -> None:
+    target = Path(path)
+    lines = target.read_text().splitlines()
+    pattern = re.compile(rf'^(?:# )?{re.escape(key)}(?:=| is not set)')
+    kept = [line for line in lines if not pattern.match(line)]
+    kept.append(f'{key}={value}')
+    target.write_text('\n'.join(kept) + '\n')
+
+
+set_config('FunKey/configs/funkey_defconfig', 'BR2_PACKAGE_IPTABLES', 'y')
+for option in (
+    'CONFIG_NETFILTER',
+    'CONFIG_NETFILTER_ADVANCED',
+    'CONFIG_NETFILTER_XTABLES',
+    'CONFIG_NETFILTER_XT_MATCH_MAC',
+    'CONFIG_IP_NF_IPTABLES',
+    'CONFIG_IP_NF_FILTER',
+):
+    set_config('FunKey/board/funkey/linux.config', option, 'y')
+
+config_path = Path('FunKey/board/funkey/rootfs-overlay/etc/default/dropbear')
+config = config_path.read_text()
+marker = '# USB-PEER-ONLY SSH'
+if marker not in config:
+    config = config.rstrip() + '''
+
+# USB-PEER-ONLY SSH
+# Dropbear is launched through dropbear-usb-peer-only, which strips every
+# pre-existing listen option and installs the direct-peer packet guard first.
+USB_SSH_INTERFACE=${USB_SSH_INTERFACE:-usb0}
+USB_SSH_DEVICE_IP=${USB_SSH_DEVICE_IP:-192.168.137.2}
+USB_SSH_PEER_IP=${USB_SSH_PEER_IP:-192.168.137.1}
+USB_SSH_PORT=${USB_SSH_PORT:-22}
+USB_SSH_PEER_MAC_FILE=${USB_SSH_PEER_MAC_FILE:-/mnt/FunKey/.ssh/usb-peer-mac}
+'''
+    config_path.write_text(config)
+
+init_path = Path('FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear')
+init = init_path.read_text()
+wrapper = '/usr/local/sbin/dropbear-usb-peer-only'
+if wrapper not in init:
+    occurrences = init.count('/usr/sbin/dropbear')
+    if occurrences < 1:
+        raise SystemExit('S50dropbear does not name /usr/sbin/dropbear')
+    init = init.replace('/usr/sbin/dropbear', wrapper)
+    init = '# USB-SSH-GUARD: Dropbear may start only through the guarded launcher.\n' + init
+    init_path.write_text(init)
+
+if wrapper not in init_path.read_text():
+    raise SystemExit('guarded Dropbear launcher was not installed into S50dropbear')
+
+workflow_path = Path('.github/workflows/iroh.yml')
+workflow = workflow_path.read_text()
+if './scripts/test-usb-ssh-guard' not in workflow:
+    anchor = '          ./scripts/test-iroh-ui\n'
+    if anchor not in workflow:
+        raise SystemExit('Iroh workflow test anchor not found')
+    workflow = workflow.replace(
+        anchor,
+        '          ./scripts/test-usb-ssh-guard\n' + anchor,
+        1,
+    )
+    workflow_path.write_text(workflow)
+
+test_path = Path('scripts/test-usb-ssh-guard')
+test = test_path.read_text()
+if 'dropbear-usb-peer-only' not in test:
+    test = test.replace(
+        'dropbear_init="$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"\n',
+        'dropbear_init="$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"\n'
+        'dropbear_wrapper="$repo/FunKey/board/funkey/rootfs-overlay/usr/local/sbin/dropbear-usb-peer-only"\n',
+        1,
+    )
+    anchor = "grep -Fq 'USB-SSH-GUARD' \"$dropbear_init\"\n"
+    addition = (
+        anchor
+        + "grep -Fq '/usr/local/sbin/dropbear-usb-peer-only' \"$dropbear_init\"\n"
+        + "grep -Fq '\"$USB_SSH_GUARD\" start' \"$dropbear_wrapper\"\n"
+        + "grep -Fq -- '-p \"${USB_SSH_DEVICE_IP}:${USB_SSH_PORT}\"' \"$dropbear_wrapper\"\n"
+    )
+    if anchor not in test:
+        raise SystemExit('USB SSH test insertion anchor not found')
+    test = test.replace(anchor, addition, 1)
+    test = test.replace(
+        'bash -n "$guard"\n',
+        'bash -n "$guard" "$dropbear_wrapper"\n',
+        1,
+    )
+    test = test.replace(
+        'dash -n "$guard"\n',
+        'dash -n "$guard" "$dropbear_wrapper"\n',
+        1,
+    )
+    test_path.write_text(test)
+PY
+
+chmod 0755 \
+    FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear \
+    FunKey/board/funkey/rootfs-overlay/usr/local/sbin/usb-ssh-guard \
+    FunKey/board/funkey/rootfs-overlay/usr/local/sbin/dropbear-usb-peer-only \
+    scripts/test-usb-ssh-guard
+
+./scripts/test-usb-ssh-guard
+git diff --check
+
+git add \
+    .github/workflows/iroh.yml \
+    FunKey/board/funkey/linux.config \
+    FunKey/configs/funkey_defconfig \
+    FunKey/board/funkey/rootfs-overlay/etc/default/dropbear \
+    FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear \
+    FunKey/board/funkey/rootfs-overlay/usr/local/sbin/usb-ssh-guard \
+    FunKey/board/funkey/rootfs-overlay/usr/local/sbin/dropbear-usb-peer-only \
+    scripts/test-usb-ssh-guard \
+    docs/usb-ssh-boundary.md
+
+if ! git diff --cached --quiet; then
+    git commit -m 'security: confine SSH to the direct USB peer'
+fi
+
+hardened_commit=$(git rev-parse HEAD)
+hardened_tree=$(git rev-parse 'HEAD^{tree}')
+
+git merge-base --is-ancestor "$UPSTREAM_COMMIT" "$hardened_commit"
+git diff --check "$UPSTREAM_COMMIT..$hardened_commit"
+
+./scripts/test-usb-ssh-guard
+./scripts/test-iroh-ui
+
+cargo build \
+    --manifest-path tools/funkey-iroh/Cargo.toml \
+    --locked \
+    --bin funkey-iroh
+cargo test \
+    --manifest-path tools/funkey-iroh/Cargo.toml \
+    --locked
+
+test -x .cargo-target/funkey-iroh/debug/funkey-iroh
+cc -std=gnu99 -O2 -Wall -Wextra -Werror \
+    $(sdl-config --cflags) \
+    tools/funkey-iroh-ui/main.c \
+    $(sdl-config --libs) -lSDL_ttf -lasound -lm \
+    -o .cargo-target/funkey-iroh-ui-native
+SDL_VIDEODRIVER=dummy \
+    .cargo-target/funkey-iroh-ui-native --self-test
+./scripts/test-iroh-portability \
+    .cargo-target/funkey-iroh/debug/funkey-iroh \
+    .cargo-target/funkey-iroh-ui-native
+
+export FUNKEY_VERSION="$RELEASE_VERSION"
+test "$(make -s print-version)" = "$RELEASE_VERSION"
+./scripts/build-iroh-firmware
+
+source_guard=FunKey/board/funkey/rootfs-overlay/usr/local/sbin/usb-ssh-guard
+source_wrapper=FunKey/board/funkey/rootfs-overlay/usr/local/sbin/dropbear-usb-peer-only
+shopt -s nullglob
+disk_archives=(images/FunKey-sdcard-"$RELEASE_VERSION"-iroh*.img.xz)
+((${#disk_archives[@]} >= 2))
+
+for archive in "${disk_archives[@]}"; do
+    work=$(mktemp -d)
+    image="$work/disk.img"
+    rootfs="$work/rootfs.ext4"
+    xz -dc "$archive" > "$image"
+
+    read -r start sectors < <(
+        sfdisk -J "$image" | python3 -c '
+import json, sys
+parts = json.load(sys.stdin)["partitiontable"]["partitions"]
+root = next((p for p in parts if str(p.get("node", "")).endswith("2")), parts[1])
+print(root["start"], root["size"])
+'
+    )
+    dd if="$image" of="$rootfs" bs=512 skip="$start" count="$sectors" \
+        status=none
+
+    debugfs -R 'cat /etc/default/dropbear' "$rootfs" \
+        > "$work/dropbear.default" 2>/dev/null
+    debugfs -R 'cat /etc/init.d/S50dropbear' "$rootfs" \
+        > "$work/S50dropbear" 2>/dev/null
+    debugfs -R \
+        "dump /usr/local/sbin/usb-ssh-guard $work/usb-ssh-guard" \
+        "$rootfs" >/dev/null 2>&1
+    debugfs -R \
+        "dump /usr/local/sbin/dropbear-usb-peer-only $work/dropbear-usb-peer-only" \
+        "$rootfs" >/dev/null 2>&1
+
+    grep -Fq 'USB-PEER-ONLY SSH' "$work/dropbear.default"
+    grep -Fq '/usr/local/sbin/dropbear-usb-peer-only' "$work/S50dropbear"
+    cmp "$source_guard" "$work/usb-ssh-guard"
+    cmp "$source_wrapper" "$work/dropbear-usb-peer-only"
+    rm -rf "$work"
+done
+
+rm -rf release-assets
+mkdir -p release-assets
+find images -maxdepth 1 -type f \
+    \( -name "*${RELEASE_VERSION}-iroh*" \
+       -o -name "SHA256SUMS-${RELEASE_VERSION}-iroh*.txt" \
+       -o -name "packages-Firmware-size-${RELEASE_VERSION}-iroh*" \) \
+    -print -exec cp {} release-assets/ \;
+
+test -s "release-assets/FunKey-sdcard-${RELEASE_VERSION}-iroh.img.xz"
+test -s "release-assets/FunKey-sdcard-${RELEASE_VERSION}-iroh-usb-debug.img.xz"
+test -s "release-assets/FunKey-rootfs-${RELEASE_VERSION}-iroh.fwu"
+test -s "release-assets/FunKey-rootfs-${RELEASE_VERSION}-iroh-usb-debug.fwu"
+
+(
+    cd release-assets
+    for manifest in SHA256SUMS-"$RELEASE_VERSION"-iroh*.txt; do
+        sha256sum -c "$manifest"
+    done
+)
+
+cat > release-assets/RELEASE-NOTES.md <<EOF
+# FunKey-OS RG Nano ${RELEASE_TAG}
+
+This release candidate reconciles the RG Nano integration line with
+DrUm78/FunKey-OS master and includes the Iroh save, savestate, portable
+library, launcher, SFTP, and persistent USB-debug work.
+
+SSH is now fail-closed and direct-USB-peer-only:
+
+- Dropbear listens only on 192.168.137.2:22.
+- The input filter requires usb0, 192.168.137.1, and the USB
+  gadget-assigned host MAC.
+- All other TCP/22 traffic is dropped, including ordinary clients on a
+  bridged LAN.
+- Production Iroh firmware remains public-key-only.
+- The usb-debug image keeps its engineering login policy but applies the
+  same direct-peer packet boundary.
+
+Hardware validation is not asserted by this RC publication. Use the
+`iroh-usb-debug` disk image for the first supervised flash.
+EOF
+
+cat > release-assets/PROVENANCE.env <<EOF
+ tag=$RELEASE_TAG
+ rc_source_commit=$hardened_commit
+ rc_source_tree=$hardened_tree
+ upstream_commit=$UPSTREAM_COMMIT
+ native_tests=passed
+ firmware_build=passed
+ embedded_usb_ssh_guard=passed
+ hardware_validation=pending
+EOF
+sed -i 's/^ //' release-assets/PROVENANCE.env
+
+# Do not publish until the exact source has built and the generated images have
+# independently yielded the guarded init path and binaries above.
+git push origin \
+    "$hardened_commit:refs/heads/rc/v2.4.0-rc.1" \
+    "$hardened_commit:refs/heads/rg-nano-next"
+
+git fetch origin master
+git checkout -B master origin/master
+git merge --no-ff "$hardened_commit" \
+    -m "Merge FunKey-OS RG Nano ${RELEASE_TAG}"
+
+release_sha=$(git rev-parse HEAD)
+release_tree=$(git rev-parse 'HEAD^{tree}')
+git push origin "$release_sha:refs/heads/master"
+
+if git ls-remote --exit-code origin "refs/tags/$RELEASE_TAG" \
+    >/dev/null 2>&1
+then
+    echo "tag already exists: $RELEASE_TAG" >&2
+    exit 1
+fi
+
+cat > /tmp/tag-message <<EOF
+FunKey-OS RG Nano ${RELEASE_TAG}
+
+commit=$release_sha
+tree=$release_tree
+upstream=$UPSTREAM_COMMIT
+firmware_build=passed
+direct_usb_peer_ssh_guard=passed
+hardware_validation=pending
+EOF
+
+git tag -a "$RELEASE_TAG" "$release_sha" -F /tmp/tag-message
+git push origin "refs/tags/$RELEASE_TAG"
+
+cat >> release-assets/PROVENANCE.env <<EOF
+release_sha=$release_sha
+release_tree=$release_tree
+EOF
+
+(
+    cd release-assets
+    rm -f "${RELEASE_TAG}-SHA256SUMS.txt"
+    sha256sum * > "${RELEASE_TAG}-SHA256SUMS.txt"
+)
+
+export RELEASE_SHA="$release_sha"
+python3 <<'PY'
+import json
+import mimetypes
+import os
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
+repo = os.environ['GITHUB_REPOSITORY']
+token = os.environ['GITHUB_TOKEN']
+tag = os.environ['RELEASE_TAG']
+release_sha = os.environ['RELEASE_SHA']
+assets_dir = Path('release-assets')
+notes = (assets_dir / 'RELEASE-NOTES.md').read_text()
+api = f'https://api.github.com/repos/{repo}'
+headers = {
+    'Accept': 'application/vnd.github+json',
+    'Authorization': f'Bearer {token}',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'funkey-rc-publisher',
+}
+
+
+def request(method, url, payload=None, content_type='application/json'):
+    data = None
+    request_headers = dict(headers)
+    if payload is not None:
+        if isinstance(payload, (bytes, bytearray)):
+            data = payload
+        else:
+            data = json.dumps(payload).encode()
+        request_headers['Content-Type'] = content_type
+    req = Request(url, data=data, headers=request_headers, method=method)
+    with urlopen(req, timeout=120) as response:
+        body = response.read()
+        return json.loads(body) if body else None
+
+
+try:
+    release = request('GET', f'{api}/releases/tags/{quote(tag)}')
+except HTTPError as error:
+    if error.code != 404:
+        raise
+    release = request('POST', f'{api}/releases', {
+        'tag_name': tag,
+        'target_commitish': release_sha,
+        'name': f'FunKey-OS RG Nano {tag}',
+        'body': notes,
+        'draft': True,
+        'prerelease': True,
+        'generate_release_notes': False,
+    })
+
+if release['tag_name'] != tag:
+    raise SystemExit(f'unexpected release tag: {release["tag_name"]}')
+
+for asset in release.get('assets', []):
+    request('DELETE', f'{api}/releases/assets/{asset["id"]}')
+
+upload_base = release['upload_url'].split('{', 1)[0]
+for path in sorted(assets_dir.iterdir()):
+    if not path.is_file():
+        continue
+    media_type = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+    request(
+        'POST',
+        f'{upload_base}?name={quote(path.name)}',
+        path.read_bytes(),
+        media_type,
+    )
+
+release = request('PATCH', f'{api}/releases/{release["id"]}', {
+    'name': f'FunKey-OS RG Nano {tag}',
+    'body': notes,
+    'draft': False,
+    'prerelease': True,
+})
+
+if release['draft'] or not release['prerelease']:
+    raise SystemExit('release did not publish as a prerelease')
+expected = {path.name for path in assets_dir.iterdir() if path.is_file()}
+actual = {asset['name'] for asset in release.get('assets', [])}
+missing = sorted(expected - actual)
+if missing:
+    raise SystemExit(f'missing release assets: {missing}')
+print(release['html_url'])
+PY
+
+git ls-remote --exit-code origin "refs/tags/$RELEASE_TAG" >/dev/null
+curl -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+    | python3 -c '
+import json, sys
+release = json.load(sys.stdin)
+assert release["tag_name"] == "v2.4.0-rc.1"
+assert release["prerelease"] is True
+assert release["draft"] is False
+assert len(release["assets"]) >= 8
+'
+
+printf '%s\n' \
+    "release_tag=$RELEASE_TAG" \
+    "release_sha=$release_sha" \
+    "release_tree=$release_tree" \
+    "rc_source_commit=$hardened_commit" \
+    "rc_source_tree=$hardened_tree" \
+    > RELEASE-PUBLISHED.env
