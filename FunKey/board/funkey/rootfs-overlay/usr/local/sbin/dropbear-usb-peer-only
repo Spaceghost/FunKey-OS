@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+CONFIG=${USB_SSH_CONFIG:-/etc/default/dropbear}
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+USB_SSH_DEVICE_IP=${USB_SSH_DEVICE_IP:-192.168.137.2}
+USB_SSH_PORT=${USB_SSH_PORT:-22}
+USB_SSH_GUARD=${USB_SSH_GUARD:-/usr/local/sbin/usb-ssh-guard}
+DROPBEAR_REAL=${DROPBEAR_REAL:-/usr/sbin/dropbear}
+
+# Install the packet boundary first. Any firewall, interface, or peer-MAC
+# discovery failure is fatal, so Dropbear never falls back to a LAN listener.
+"$USB_SSH_GUARD" start
+
+# Preserve all policy arguments except existing listeners. The sole listener is
+# then appended explicitly as the USB gadget's IPv4 address.
+_arguments=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -p)
+            shift
+            [ "$#" -gt 0 ] && shift
+            ;;
+        -p*)
+            shift
+            ;;
+        *)
+            _arguments="$_arguments
+$1"
+            shift
+            ;;
+    esac
+done
+
+set --
+_old_ifs=$IFS
+IFS='
+'
+for _argument in $_arguments; do
+    [ -n "$_argument" ] || continue
+    set -- "$@" "$_argument"
+done
+IFS=$_old_ifs
+
+exec "$DROPBEAR_REAL" "$@" -p "${USB_SSH_DEVICE_IP}:${USB_SSH_PORT}"
