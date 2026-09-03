@@ -1,0 +1,156 @@
+#!/bin/sh
+# Restrict Dropbear to the physical USB gadget peer. A normal bridge preserves
+# the original sender MAC, so bridged LAN clients fail the source-IP-and-MAC
+# admission rule even though they arrive on usb0.
+set -eu
+
+CONFIG=${USB_SSH_CONFIG:-/etc/default/dropbear}
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+USB_SSH_INTERFACE=${USB_SSH_INTERFACE:-usb0}
+USB_SSH_DEVICE_IP=${USB_SSH_DEVICE_IP:-192.168.137.2}
+USB_SSH_PEER_IP=${USB_SSH_PEER_IP:-192.168.137.1}
+USB_SSH_PORT=${USB_SSH_PORT:-22}
+USB_SSH_PEER_MAC_FILE=${USB_SSH_PEER_MAC_FILE:-/mnt/FunKey/.ssh/usb-peer-mac}
+USB_SSH_CONFIGFS_ROOT=${USB_SSH_CONFIGFS_ROOT:-/sys/kernel/config/usb_gadget}
+USB_SSH_SYS_CLASS_NET=${USB_SSH_SYS_CLASS_NET:-/sys/class/net}
+USB_SSH_IPTABLES=${USB_SSH_IPTABLES:-}
+USB_SSH_CHAIN=${USB_SSH_CHAIN:-FUNKEY_USB_SSH}
+
+fail()
+{
+    echo "usb-ssh-guard: $*" >&2
+    exit 1
+}
+
+valid_mac()
+{
+    case "$1" in
+        [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+find_iptables()
+{
+    if [ -n "$USB_SSH_IPTABLES" ]; then
+        [ -x "$USB_SSH_IPTABLES" ] ||
+            fail "configured iptables is not executable: $USB_SSH_IPTABLES"
+        printf '%s\n' "$USB_SSH_IPTABLES"
+        return
+    fi
+    for candidate in /usr/sbin/iptables /sbin/iptables /usr/bin/iptables; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    fail "iptables is unavailable; refusing to start SSH"
+}
+
+emit_mac()
+{
+    mac=$(printf '%s' "$1" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+    valid_mac "$mac" || fail "invalid USB peer MAC: $1"
+    printf '%s\n' "$mac"
+}
+
+peer_macs()
+{
+    if [ -s "$USB_SSH_PEER_MAC_FILE" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ''|'#'*) continue ;;
+            esac
+            emit_mac "$line"
+        done < "$USB_SSH_PEER_MAC_FILE"
+        return
+    fi
+
+    found=0
+    for address_file in \
+        "$USB_SSH_CONFIGFS_ROOT"/*/functions/ecm.*/host_addr \
+        "$USB_SSH_CONFIGFS_ROOT"/*/functions/rndis.*/host_addr \
+        "$USB_SSH_CONFIGFS_ROOT"/*/functions/ncm.*/host_addr
+    do
+        [ -r "$address_file" ] || continue
+        IFS= read -r mac < "$address_file" || continue
+        emit_mac "$mac"
+        found=1
+    done
+    [ "$found" -eq 1 ] ||
+        fail "cannot determine the USB host MAC; refusing to start SSH"
+}
+
+install_rules()
+{
+    [ -d "$USB_SSH_SYS_CLASS_NET/$USB_SSH_INTERFACE" ] ||
+        fail "interface $USB_SSH_INTERFACE is unavailable"
+
+    iptables=$(find_iptables)
+    macs=$(peer_macs | sort -u)
+    [ -n "$macs" ] || fail "USB peer MAC allowlist is empty"
+
+    "$iptables" -N "$USB_SSH_CHAIN" 2>/dev/null || :
+    "$iptables" -F "$USB_SSH_CHAIN"
+
+    # Put the drop rule in place before any allow rules. Reconfiguration
+    # therefore fails closed, including while Dropbear is being restarted.
+    "$iptables" -A "$USB_SSH_CHAIN" -j DROP
+
+    old_ifs=$IFS
+    IFS='
+'
+    for mac in $macs; do
+        "$iptables" -I "$USB_SSH_CHAIN" 1 \
+            -i "$USB_SSH_INTERFACE" \
+            -d "$USB_SSH_DEVICE_IP" \
+            -s "$USB_SSH_PEER_IP" \
+            -p tcp --dport "$USB_SSH_PORT" \
+            -m mac --mac-source "$mac" \
+            -j ACCEPT
+    done
+    IFS=$old_ifs
+
+    if ! "$iptables" -C INPUT -p tcp --dport "$USB_SSH_PORT" \
+        -j "$USB_SSH_CHAIN" 2>/dev/null
+    then
+        "$iptables" -I INPUT 1 -p tcp --dport "$USB_SSH_PORT" \
+            -j "$USB_SSH_CHAIN"
+    fi
+}
+
+remove_rules()
+{
+    iptables=$(find_iptables)
+    while "$iptables" -C INPUT -p tcp --dport "$USB_SSH_PORT" \
+        -j "$USB_SSH_CHAIN" 2>/dev/null
+    do
+        "$iptables" -D INPUT -p tcp --dport "$USB_SSH_PORT" \
+            -j "$USB_SSH_CHAIN" || break
+    done
+    "$iptables" -F "$USB_SSH_CHAIN" 2>/dev/null || :
+    "$iptables" -X "$USB_SSH_CHAIN" 2>/dev/null || :
+}
+
+case "${1:-}" in
+    start|reload)
+        install_rules
+        ;;
+    stop)
+        remove_rules
+        ;;
+    status)
+        iptables=$(find_iptables)
+        "$iptables" -C INPUT -p tcp --dport "$USB_SSH_PORT" \
+            -j "$USB_SSH_CHAIN"
+        ;;
+    *)
+        echo "Usage: $0 {start|reload|stop|status}" >&2
+        exit 64
+        ;;
+esac
