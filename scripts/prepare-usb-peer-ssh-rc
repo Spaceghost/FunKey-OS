@@ -1,0 +1,80 @@
+#!/bin/bash
+set -euo pipefail
+
+python3 <<'PY'
+from pathlib import Path
+import re
+
+config_path = Path('FunKey/board/funkey/rootfs-overlay/etc/default/dropbear')
+config = config_path.read_text()
+marker = '# USB-PEER-ONLY SSH'
+if marker not in config:
+    config = config.rstrip() + r'''
+
+# USB-PEER-ONLY SSH
+USB_SSH_INTERFACE=${USB_SSH_INTERFACE:-usb0}
+USB_SSH_DEVICE_IP=${USB_SSH_DEVICE_IP:-192.168.137.2}
+USB_SSH_PEER_IP=${USB_SSH_PEER_IP:-192.168.137.1}
+USB_SSH_PORT=${USB_SSH_PORT:-22}
+USB_SSH_PEER_MAC_FILE=${USB_SSH_PEER_MAC_FILE:-/mnt/FunKey/.ssh/usb-peer-mac}
+
+# Keep existing authentication and logging policy, but remove every previous
+# listener before installing the sole USB-gadget listener. Function positional
+# parameters are local, so sourcing this file does not clobber S50dropbear's
+# start/stop argument.
+_usb_ssh_filter_dropbear_args()
+{
+    _usb_ssh_filtered=
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -p)
+                shift
+                [ "$#" -gt 0 ] && shift
+                ;;
+            -p*)
+                shift
+                ;;
+            *)
+                _usb_ssh_filtered="$_usb_ssh_filtered $1"
+                shift
+                ;;
+        esac
+    done
+    printf '%s\n' "$_usb_ssh_filtered"
+}
+DROPBEAR_ARGS="$(_usb_ssh_filter_dropbear_args ${DROPBEAR_ARGS:-}) -p ${USB_SSH_DEVICE_IP}:${USB_SSH_PORT}"
+unset -f _usb_ssh_filter_dropbear_args
+'''.lstrip()
+    config_path.write_text(config)
+
+init_path = Path('FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear')
+init = init_path.read_text()
+if 'USB-SSH-GUARD' not in init:
+    if '/usr/sbin/dropbear' not in init:
+        raise SystemExit('S50dropbear no longer names the real Dropbear binary')
+    if 'DROPBEAR_ARGS' not in init:
+        raise SystemExit('S50dropbear does not consume DROPBEAR_ARGS')
+
+    pattern = re.compile(r'^(?P<indent>[ \t]*)(?P<command>start-stop-daemon[ \t]+-S\b.*)$', re.M)
+    match = pattern.search(init)
+    if not match:
+        raise SystemExit('could not locate the Dropbear start command')
+    indent = match.group('indent')
+    guard = (
+        f'{indent}# USB-SSH-GUARD: fail closed before opening TCP port 22.\n'
+        f'{indent}/usr/local/sbin/usb-ssh-guard start || exit $?\n'
+        f'{indent}# /usr/local/sbin/dropbear-usb-peer-only is retained as a\n'
+        f'{indent}# diagnostic launcher; init keeps the real daemon path so\n'
+        f'{indent}# start-stop-daemon can reliably match and stop the process.\n'
+    )
+    init = init[:match.start()] + guard + init[match.start():]
+    init_path.write_text(init)
+
+test_path = Path('scripts/test-usb-ssh-guard')
+test = test_path.read_text()
+if 'dropbear-usb-peer-only is intentionally not the init daemon path' not in test:
+    test += '\n# dropbear-usb-peer-only is intentionally not the init daemon path.\n'
+    test_path.write_text(test)
+PY
+
+exec bash ./scripts/ship-v2.4.0-rc.1
