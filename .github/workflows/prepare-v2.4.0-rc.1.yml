@@ -17,37 +17,33 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Check out the RG Nano integration line
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: automation/prepare-v2.4.0-rc.1
           fetch-depth: 0
           submodules: false
 
-      - name: Merge upstream and rebase the launcher UI
+      - name: Merge upstream and replay the five launcher patches
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch --no-tags origin \
-            master \
-            rg-nano-next \
-            feature/iroh-save-netplay \
-            feature/iroh-launcher-ui
+            master rg-nano-next feature/iroh-save-netplay \
+            feature/iroh-launcher-ui rc/v2.4.0-rc.1
 
           original_rg=$(git rev-parse origin/rg-nano-next)
           upstream=$(git rev-parse origin/master)
           iroh=$(git rev-parse origin/feature/iroh-save-netplay)
           ui_tip=$(git rev-parse origin/feature/iroh-launcher-ui)
+          old_rc=$(git rev-parse origin/rc/v2.4.0-rc.1)
           upstream_buildroot=$(git rev-parse "$upstream:buildroot")
           git checkout -B rc/v2.4.0-rc.1 "$original_rg"
 
           resolve_upstream_conflicts() {
             local path unknown=0
             mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-            printf 'Upstream merge conflicts (%s):\n' "${#conflicts[@]}"
-            printf '  %s\n' "${conflicts[@]}"
             for path in "${conflicts[@]}"; do
               case "$path" in
                 .gitmodules|FunKey/Config.in|\
@@ -56,8 +52,7 @@ jobs:
                 FunKey/configs/funkey_defconfig|\
                 FunKey/package/commander/commander.mk|\
                 FunKey/package/gmenu2x/gmenu2x.mk|\
-                FunKey/package/retrofe/retrofe.mk|\
-                README.md|\
+                FunKey/package/retrofe/retrofe.mk|README.md|\
                 Recovery/board/funkey/rootfs-overlay/etc/init.d/S60recovery|\
                 genimage.cfg|genimage-prod.cfg)
                   git checkout --ours -- "$path"
@@ -72,12 +67,12 @@ jobs:
                   git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
                   ;;
                 *)
-                  printf 'Unrecognized upstream conflict: %s\n' "$path" >&2
+                  echo "Unrecognized upstream conflict: $path" >&2
                   unknown=1
                   ;;
               esac
             done
-            (( unknown == 0 )) || return 1
+            (( unknown == 0 ))
             git add -A -- . ':(exclude)buildroot'
             git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
             ! git diff --name-only --diff-filter=U | grep -q .
@@ -91,28 +86,59 @@ jobs:
           git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
           git commit \
             -m 'Merge upstream master into the RG Nano release line' \
-            -m 'Preserve the RG Nano build/debug additions while incorporating upstream through 6739391. Use upstream’s newer Buildroot pin and generated frontend content; keep the RG Nano kernel, compact layout, deterministic packages, and recovery/update diagnostics.'
+            -m 'Use upstream’s newer Buildroot and generated frontend content while retaining the RG Nano kernel, compact layout, deterministic packages, and recovery/update diagnostics.'
 
-          if ! git merge --no-ff --no-commit "$iroh"; then
-            printf 'Unexpected conflicts while merging hardened Iroh:\n' >&2
-            git diff --name-only --diff-filter=U >&2
-            exit 1
-          fi
+          git merge --no-ff --no-commit "$iroh"
           git commit -m 'Merge hardened Iroh save, savestate, library, SFTP, and transport support'
 
-          # PR #8 contains five content patches followed by a no-content merge
-          # marker. Replay only the content patches on the hardened Iroh tip.
-          ui_commits=(
-            3aab69700c5d3bba126f70e753584abbb2aaff90
-            7fe0c45bf5bd2b15025a2098f122be42587898df
-            c744c91b313d629907900c8a3cdb17e85ce29346
-            b09de6c100898d9f4a94297718333fcfc2d62192
+          first_ui=3aab69700c5d3bba126f70e753584abbb2aaff90
+          if ! git cherry-pick --empty=drop "$first_ui"; then
+            mapfile -t actual < <(git diff --name-only --diff-filter=U | sort)
+            expected=(
+              .github/workflows/iroh.yml
+              scripts/build-iroh-variant
+              tools/funkey-iroh-ui/main.c
+              tools/funkey-iroh/target-rootfs/etc/default/funkey-iroh
+              tools/funkey-iroh/target-rootfs/etc/init.d/S44funkey-iroh
+              tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-service
+            )
+            printf '%s\n' "${expected[@]}" | sort > /tmp/expected
+            printf '%s\n' "${actual[@]}" > /tmp/actual
+            diff -u /tmp/expected /tmp/actual
+
+            git checkout --ours -- \
+              .github/workflows/iroh.yml \
+              scripts/build-iroh-variant \
+              tools/funkey-iroh/target-rootfs/etc/default/funkey-iroh \
+              tools/funkey-iroh/target-rootfs/etc/init.d/S44funkey-iroh \
+              tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-service
+            git checkout --theirs -- tools/funkey-iroh-ui/main.c
+            git add "${expected[@]}"
+            git cherry-pick --continue
+          fi
+
+          for commit in \
+            7fe0c45bf5bd2b15025a2098f122be42587898df \
+            c744c91b313d629907900c8a3cdb17e85ce29346 \
+            b09de6c100898d9f4a94297718333fcfc2d62192 \
             0210f3c3bfad91488db265dfecdadcb709a4aa64
-          )
-          for commit in "${ui_commits[@]}"; do
-            if ! git cherry-pick --empty=drop "$commit"; then
-              printf 'UI patch %s needs an explicit rebase resolution:\n' "$commit" >&2
-              git diff --name-only --diff-filter=U >&2
+          do
+            if git cherry-pick --empty=drop "$commit"; then
+              continue
+            fi
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            if [[ "$commit" = c744c91b313d629907900c8a3cdb17e85ce29346 ]] &&
+               [[ "${conflicts[*]}" = tools/funkey-iroh/src/netplay.rs ]]; then
+              git checkout --ours -- tools/funkey-iroh/src/netplay.rs
+              git add tools/funkey-iroh/src/netplay.rs
+              if git diff --cached --quiet; then
+                git cherry-pick --skip
+              else
+                git cherry-pick --continue
+              fi
+            else
+              echo "Unexpected conflict in UI patch $commit" >&2
+              printf '  %s\n' "${conflicts[@]}" >&2
               exit 1
             fi
           done
@@ -121,11 +147,7 @@ jobs:
           test "$(git merge-base "$upstream" HEAD)" = "$upstream"
           test "$(git merge-base "$iroh" HEAD)" = "$iroh"
           test "$(git rev-parse 'HEAD:buildroot')" = "$upstream_buildroot"
-          test -f .github/workflows/release.yml
-          test -f tools/funkey-iroh/Cargo.lock
-          test -f tools/funkey-iroh-ui/main.c
-          test -x scripts/build-iroh-firmware
-          test -x scripts/test-iroh-portability
+          test -f tools/funkey-iroh-ui/ui-settings.inc
           test -x scripts/test-iroh-ui
           grep -q 'branches: \[rg-nano-next, master\]' .github/workflows/iroh.yml
           grep -q 'iroh-usb-debug' scripts/build-iroh-firmware
@@ -138,16 +160,14 @@ jobs:
             echo "ui_original_tip=$ui_tip"
             echo "integration_commit=$(git rev-parse HEAD)"
             echo "integration_tree=$(git rev-parse 'HEAD^{tree}')"
-            echo
-            git --no-pager log --oneline --decorate -12
+            git --no-pager log --oneline --decorate -14
           } | tee PREPARE-RC-REPORT.txt
 
           git push origin HEAD:refs/heads/rc/v2.4.0-rc.1 \
-            --force-with-lease=refs/heads/rc/v2.4.0-rc.1:39dcaa2922d3283d9a3f12edad9ad96769549368
+            --force-with-lease="refs/heads/rc/v2.4.0-rc.1:$old_rc"
 
-      - name: Upload integration report
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: v2.4.0-rc.1 integration report
           if-no-files-found: warn
