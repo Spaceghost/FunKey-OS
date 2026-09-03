@@ -69,8 +69,6 @@ jobs:
                   git checkout --theirs -- "$path"
                   ;;
                 buildroot)
-                  # Resolve the gitlink directly. A checkout with submodules
-                  # disabled has no child repository for `git add` to inspect.
                   git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
                   ;;
                 *)
@@ -95,8 +93,6 @@ jobs:
             resolve_upstream_conflicts
           fi
 
-          # Preserve the small RG Nano build additions while deliberately
-          # taking upstream's newer Buildroot gitlink.
           git checkout "$original_rg" -- .gitignore .gitmodules FunKey/Config.in
           git add .gitignore .gitmodules FunKey/Config.in
           git update-index --cacheinfo 160000,"$upstream_buildroot",buildroot
@@ -104,18 +100,52 @@ jobs:
             -m 'Merge upstream master into the RG Nano release line' \
             -m 'Preserve the RG Nano build/debug additions while incorporating the 54 upstream commits through 6739391. Use upstream’s newer Buildroot pin and frontend/game content; keep the RG Nano ccache, branch-tracking, compact image layout, deterministic package pins, and recovery/update diagnostics.'
 
-          merge_component() {
-            local ref=$1 message=$2
-            if ! git merge --no-ff --no-commit "$ref"; then
-              printf 'Unexpected conflicts while merging %s:\n' "$ref" >&2
+          if ! git merge --no-ff --no-commit "$iroh"; then
+            printf 'Unexpected conflicts while merging Iroh transport:\n' >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+          git commit -m 'Merge Iroh save, savestate, portable-library, SFTP, and transport support'
+
+          resolve_ui_conflicts() {
+            local path unknown=0
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            printf 'Launcher UI merge conflicts (%s):\n' "${#conflicts[@]}"
+            printf '  %s\n' "${conflicts[@]}"
+            for path in "${conflicts[@]}"; do
+              case "$path" in
+                .github/workflows/iroh.yml|\
+                scripts/build-iroh-variant|\
+                tools/funkey-iroh-ui/main.c|\
+                tools/funkey-iroh/target-rootfs/etc/default/funkey-iroh|\
+                tools/funkey-iroh/target-rootfs/etc/init.d/S44funkey-iroh|\
+                tools/funkey-iroh/target-rootfs/usr/bin/funkey-iroh-service)
+                  # These are the six files deliberately advanced by the
+                  # stacked launcher branch. Its versions supersede the
+                  # transport-only scaffolding from PR #6.
+                  git checkout --theirs -- "$path"
+                  ;;
+                *)
+                  printf 'Unrecognized launcher conflict: %s\n' "$path" >&2
+                  unknown=1
+                  ;;
+              esac
+            done
+            if (( unknown != 0 )); then
+              return 1
+            fi
+            git add -- "${conflicts[@]}"
+            if git diff --name-only --diff-filter=U | grep -q .; then
+              printf 'Unresolved launcher paths remain:\n' >&2
               git diff --name-only --diff-filter=U >&2
               return 1
             fi
-            git commit -m "$message"
           }
 
-          merge_component "$iroh" 'Merge Iroh save, savestate, portable-library, SFTP, and transport support'
-          merge_component "$ui" 'Merge the Iroh launcher UI and post-game synchronization flow'
+          if ! git merge --no-ff --no-commit "$ui"; then
+            resolve_ui_conflicts
+          fi
+          git commit -m 'Merge the Iroh launcher UI and post-game synchronization flow'
 
           git diff --check
           test "$(git merge-base "$upstream" HEAD)" = "$upstream"
