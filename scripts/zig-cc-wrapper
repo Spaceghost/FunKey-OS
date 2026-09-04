@@ -141,7 +141,10 @@ for arg in "$@"; do
 			args+=("-Wl,-Ttext")
 			next_is_linker_value=true ;;
 		-Wl,-Map,*|-Wl,-Map=*)
-			args+=("$arg") ;;
+			# Zig's cc frontend rejects GNU ld map-file options before handing
+			# control to the selected target linker. The map is diagnostic-only;
+			# dropping it preserves the linked binary and lets BusyBox complete.
+			;;
 		-Wl,-stats)
 			;;
 		-Wl,*,-stats,-lc)
