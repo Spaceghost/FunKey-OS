@@ -92,6 +92,70 @@ static int choose_launch(const char *system, const char *game, const char *rom)
     return 1;
 }
 
+static void close_ui_fonts(void)
+{
+    if (ui.title_font != NULL) {
+        TTF_CloseFont(ui.title_font);
+        ui.title_font = NULL;
+    }
+    if (ui.body_font != NULL) {
+        TTF_CloseFont(ui.body_font);
+        ui.body_font = NULL;
+    }
+    if (ui.small_font != NULL) {
+        TTF_CloseFont(ui.small_font);
+        ui.small_font = NULL;
+    }
+}
+
+static int open_ui_fonts_from(const char *path)
+{
+    int large = ui.height >= 300;
+
+    if (path == NULL || *path == '\0') {
+        return -1;
+    }
+
+    ui.title_font = TTF_OpenFont(path, large ? 18 : 15);
+    ui.body_font = TTF_OpenFont(path, large ? 15 : 13);
+    ui.small_font = TTF_OpenFont(path, large ? 12 : 10);
+    if (ui.title_font != NULL && ui.body_font != NULL && ui.small_font != NULL) {
+        return 0;
+    }
+
+    close_ui_fonts();
+    return -1;
+}
+
+static int open_ui_fonts(void)
+{
+    const char *override = getenv("FUNKEY_IROH_UI_FONT");
+    const char *candidates[] = {
+        FONT_PATH,
+        FONT_PATH_FULL,
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        NULL
+    };
+    int index;
+
+    if (override != NULL && *override != '\0' &&
+        open_ui_fonts_from(override) == 0) {
+        return 0;
+    }
+
+    for (index = 0; candidates[index] != NULL; index++) {
+        if (open_ui_fonts_from(candidates[index]) == 0) {
+            return 0;
+        }
+    }
+
+    fprintf(stderr,
+            "TTF_OpenFont: no usable UI font; set FUNKEY_IROH_UI_FONT (%s)\n",
+            TTF_GetError());
+    return -1;
+}
+
 static int initialize_ui(void)
 {
     const char *driver = getenv("SDL_VIDEODRIVER");
@@ -120,19 +184,10 @@ static int initialize_ui(void)
     ui.width = ui.screen->w;
     ui.height = ui.screen->h;
 
-    ui.title_font = TTF_OpenFont(FONT_PATH, ui.height >= 300 ? 18 : 15);
-    ui.body_font = TTF_OpenFont(FONT_PATH, ui.height >= 300 ? 15 : 13);
-    ui.small_font = TTF_OpenFont(FONT_PATH, ui.height >= 300 ? 12 : 10);
-    if (ui.title_font == NULL || ui.body_font == NULL || ui.small_font == NULL) {
-        if (ui.title_font) TTF_CloseFont(ui.title_font);
-        if (ui.body_font) TTF_CloseFont(ui.body_font);
-        if (ui.small_font) TTF_CloseFont(ui.small_font);
-        ui.title_font = TTF_OpenFont(FONT_PATH_FULL, ui.height >= 300 ? 18 : 15);
-        ui.body_font = TTF_OpenFont(FONT_PATH_FULL, ui.height >= 300 ? 15 : 13);
-        ui.small_font = TTF_OpenFont(FONT_PATH_FULL, ui.height >= 300 ? 12 : 10);
-    }
-    if (ui.title_font == NULL || ui.body_font == NULL || ui.small_font == NULL) {
-        fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
+    if (open_ui_fonts() != 0) {
+        TTF_Quit();
+        SDL_Quit();
+        ui.screen = NULL;
         return -1;
     }
 
@@ -151,11 +206,31 @@ static int initialize_ui(void)
 
 static void shutdown_ui(void)
 {
-    if (ui.title_font) TTF_CloseFont(ui.title_font);
-    if (ui.body_font) TTF_CloseFont(ui.body_font);
-    if (ui.small_font) TTF_CloseFont(ui.small_font);
+    close_ui_fonts();
     TTF_Quit();
     SDL_Quit();
+    ui.screen = NULL;
+}
+
+static int ui_self_test(void)
+{
+    int width = 0;
+    int height = 0;
+
+    if (TTF_SizeUTF8(ui.title_font, "Iroh UI", &width, &height) != 0 ||
+        width <= 0 || height <= 0) {
+        fprintf(stderr, "TTF_SizeUTF8: %s\n", TTF_GetError());
+        return 1;
+    }
+
+    draw_header("Iroh UI", "native renderer self-test");
+    draw_text(ui.body_font, "pair  sync  play", 12, 54, ui.foreground);
+    draw_footer("self-test");
+    if (SDL_Flip(ui.screen) != 0) {
+        fprintf(stderr, "SDL_Flip: %s\n", SDL_GetError());
+        return 1;
+    }
+    return 0;
 }
 
 static void usage(FILE *stream)
@@ -165,7 +240,8 @@ static void usage(FILE *stream)
             "  funkey-iroh-ui\n"
             "  funkey-iroh-ui --launch SYSTEM GAME [ROM]\n"
             "  funkey-iroh-ui --session-status\n"
-            "  funkey-iroh-ui --message TITLE TEXT\n");
+            "  funkey-iroh-ui --message TITLE TEXT\n"
+            "  funkey-iroh-ui --self-test\n");
 }
 
 int main(int argc, char **argv)
@@ -197,6 +273,13 @@ int main(int argc, char **argv)
             status = 64;
         } else {
             message_screen(argv[2], argv[3], ui.warning);
+        }
+    } else if (strcmp(argv[1], "--self-test") == 0) {
+        if (argc != 2) {
+            usage(stderr);
+            status = 64;
+        } else {
+            status = ui_self_test();
         }
     } else {
         usage(stderr);

@@ -201,6 +201,7 @@ jobs:
 
           has_files download && echo 'downloads=true' >> "$GITHUB_OUTPUT"
           has_files "$BR2_CCACHE_DIR" && echo 'ccache=true' >> "$GITHUB_OUTPUT"
+          :
 
       - name: Save compiler cache, including successful work from failed builds
         if: >-
