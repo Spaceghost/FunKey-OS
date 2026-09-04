@@ -8,22 +8,42 @@ gmenu2x_patch="$repo/FunKey/board/funkey/patches/gmenu2x/0001-show-ssh-sftp-deta
 
 authentication_hint='key: /authorized_keys'
 
+fail() {
+	printf 'test-usb-menu-info: %s\n' "$*" >&2
+	exit 1
+}
+
 assert_line() {
-	grep -Fqx "$2" "$1"
+	grep -Fqx "$2" "$1" ||
+		fail "missing exact line in $1: $2"
+}
+
+assert_contains() {
+	grep -Fq "$2" "$1" ||
+		fail "missing text in $1: $2"
+}
+
+assert_absent() {
+	if grep -Fq "$2" "$1"; then
+		fail "unexpected text in $1: $2"
+	fi
 }
 
 assert_patch_contract() {
 	patch_file=$1
+	free_count=
 
-	grep -Fq 'usb_network_enabled = access("/sys/class/net/usb0", F_OK) == 0;' "$patch_file"
-	grep -Fq '"SSH / SFTP",' "$patch_file"
-	grep -Fq '"root@192.168.137.2",' "$patch_file"
-	grep -Fq '"key: /authorized_keys"' "$patch_file"
-	grep -Fq 'usb_network_enabled && !menu_action && !menu_confirmation' "$patch_file"
-	grep -Fq 'menu_small_info_font' "$patch_file"
-	[ "$(grep -Fc 'SDL_FreeSurface(usb_text_surface);' "$patch_file")" -eq 1 ]
-	! grep -Fq 'password: none' "$patch_file"
-	! grep -Fq '/mnt/usbnet' "$patch_file"
+	assert_contains "$patch_file" 'usb_network_enabled = access("/sys/class/net/usb0", F_OK) == 0;'
+	assert_contains "$patch_file" '"SSH / SFTP",'
+	assert_contains "$patch_file" '"root@192.168.137.2",'
+	assert_contains "$patch_file" '"key: /authorized_keys"'
+	assert_contains "$patch_file" 'usb_network_enabled && !menu_action && !menu_confirmation'
+	assert_contains "$patch_file" 'menu_small_info_font'
+	free_count=$(grep -Fc 'SDL_FreeSurface(usb_text_surface);' "$patch_file" || true)
+	[ "$free_count" -eq 1 ] ||
+		fail "expected one usb_text_surface free in $patch_file, found $free_count"
+	assert_absent "$patch_file" 'password: none'
+	assert_absent "$patch_file" '/mnt/usbnet'
 }
 
 assert_patch_contract "$retrofe_patch"
@@ -35,7 +55,7 @@ assert_line "$repo/FunKey/package/gmenu2x/gmenu2x.mk" \
 	'GMENU2X_VERSION = 8dbc7bfc482262ec0d23c1abad6089aef4bcb6d0'
 
 # Prevent the on-device instructions from drifting away from the actual
-# network, authentication, and key-provisioning configuration.
+# point-to-point network, authentication, and key-provisioning configuration.
 for rootfs in FunKey Recovery; do
 	case "$rootfs" in
 		FunKey) dropbear_init=S50dropbear ;;
@@ -43,11 +63,15 @@ for rootfs in FunKey Recovery; do
 	esac
 
 	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/dhcpcd.conf" \
-		'static ip_address=192.168.137.2/24'
+		'static ip_address=192.168.137.2/30'
+	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/dhcpcd.conf" \
+		'static routers=192.168.137.1'
 	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/default/dropbear" \
 		'DROPBEAR_ARGS="-s -g"'
-	grep -Fq 'cp /mnt/authorized_keys /mnt/FunKey/.ssh/authorized_keys' \
-		"$repo/$rootfs/board/funkey/rootfs-overlay/etc/init.d/$dropbear_init"
+	assert_line "$repo/$rootfs/board/funkey/rootfs-overlay/etc/default/dropbear" \
+		'DROPBEAR_BIND_ADDRESS=192.168.137.2'
+	assert_contains "$repo/$rootfs/board/funkey/rootfs-overlay/etc/init.d/$dropbear_init" \
+		'cp /mnt/authorized_keys /mnt/FunKey/.ssh/authorized_keys'
 	assert_line "$repo/$rootfs/configs/$(printf '%s' "$rootfs" | tr '[:upper:]' '[:lower:]')_defconfig" \
 		'BR2_TARGET_GENERIC_ROOT_PASSWD=""'
 	assert_line "$repo/$rootfs/configs/$(printf '%s' "$rootfs" | tr '[:upper:]' '[:lower:]')_defconfig" \
@@ -57,7 +81,8 @@ for rootfs in FunKey Recovery; do
 done
 
 for display_line in 'SSH / SFTP' 'root@192.168.137.2' "$authentication_hint"; do
-	[ "${#display_line}" -le 24 ]
+	[ "${#display_line}" -le 24 ] ||
+		fail "USB menu line exceeds 24 characters: $display_line"
 done
 
 printf '%s\n' 'USB menu connection-info tests passed'
