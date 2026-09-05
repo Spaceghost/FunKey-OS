@@ -2,8 +2,9 @@
 set -eu
 
 driver=cc
+language=c
 case "$0" in
-	*++*|*cxx*) driver=c++ ;;
+	*++*|*cxx*) driver=c++; language=c++ ;;
 esac
 
 if [ "$#" -eq 1 ] && [ "$1" = "-v" ]; then
@@ -32,22 +33,52 @@ for arg in "$@"; do
 	fi
 done
 
+# Queries do not generate code. Zig delegates these to Clang, which does not
+# understand Zig's baseline CPU name on x86.
+for arg in "$@"; do
+	case "$arg" in
+		-dumpmachine|-dumpversion|-dumpfullversion|-print-*)
+			exec zig "$driver" "$@" ;;
+	esac
+done
+
 # Keep the native OS and ABI so host headers and libraries remain visible.
-# An explicit Linux triple disables Zig's native search paths, hiding crypt.h
-# and libcrypt and making later Autoconf function checks fail spuriously.
-# Select the CPU separately: cached tools must not require the build runner's
-# newer instructions. Use Zig's baseline spelling, not Clang's -march names.
+# An explicit Linux triple hides crypt.h and libcrypt, causing misleading
+# Autoconf failures. Only the CPU must be restricted for portable host caches.
 portable_cpu_args=()
 case "$(uname -m)" in
-	x86_64|aarch64|arm64) portable_cpu_args=(-target native -mcpu=baseline) ;;
+	x86_64|aarch64|arm64) portable_cpu_args=(-mcpu=baseline) ;;
 esac
 
 # Old libtool releases pass GNU ld scripts as bare compiler-driver inputs.
 # GCC recognizes those implicitly, while Zig/Clang requires an explicit -T.
 args=()
 boundary_section_link=false
+input_language=none
+operand=
 for arg in "$@"; do
+	if [ -n "$operand" ]; then
+		[ "$operand" != language ] || input_language=$arg
+		args+=("$arg")
+		operand=
+		continue
+	fi
 	case "$arg" in
+		-x) operand=language; args+=("$arg") ;;
+		-x*) input_language=${arg#-x}; args+=("$arg") ;;
+		-o|-MF|-MT|-MQ|-I|-L|-B|-D|-U|-include|-imacros|-isystem|-iquote|\
+		-idirafter|-iprefix|-iwithprefix|-iwithprefixbefore|-isysroot|--sysroot|\
+		-target|--target|-arch|--libc|-Xclang|-Xlinker|-Xassembler|-Xpreprocessor)
+			operand=value; args+=("$arg") ;;
+		-)
+			# Meson's untyped stdin probe otherwise bypasses Zig's target
+			# parser and sends -mcpu=baseline straight to Clang. Give only
+			# this input a language, preserving subsequent file extensions.
+			if [ "$input_language" = none ]; then
+				args+=(-x "$language" - -x none)
+			else
+				args+=("$arg")
+			fi ;;
 		*imagetool.o|*file2alias.o) boundary_section_link=true; args+=("$arg") ;;
 		-march=*|-mcpu=*|-mtune=*)
 			if [ "${#portable_cpu_args[@]}" -eq 0 ]; then
