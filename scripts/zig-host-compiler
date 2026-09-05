@@ -38,7 +38,20 @@ done
 # baseline and discard caller-supplied CPU tuning whenever one is known.
 portable_cpu_args=()
 case "$(uname -m)" in
-	x86_64) portable_cpu_args=(-march=x86_64) ;;
+	x86_64)
+		case "$(uname -s)" in
+			Linux)
+				# Zig 0.16 forwards untyped stdin preprocessing to Clang,
+				# which rejects Zig's x86_64 CPU spelling. An explicit
+				# target selects the baseline CPU on both code paths.
+				# Match the host libc rather than Zig's own build ABI.
+				if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+					portable_cpu_args=(-target x86_64-linux-gnu)
+				else
+					portable_cpu_args=(-target x86_64-linux-musl)
+				fi ;;
+			*) portable_cpu_args=(-march=x86_64) ;;
+		esac ;;
 	aarch64|arm64) portable_cpu_args=(-mcpu=generic) ;;
 esac
 

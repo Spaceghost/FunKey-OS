@@ -1,0 +1,107 @@
+#!/bin/bash
+set -euo pipefail
+
+source_repo=$(cd "$(dirname "$0")/.." && pwd)
+augment="$source_repo/scripts/augment-iroh-ui-rootfs"
+mksquashfs_bin=${MKSQUASHFS:-$(command -v mksquashfs)}
+unsquashfs_bin=${UNSQUASHFS:-$(command -v unsquashfs)}
+export UNSQUASHFS="$unsquashfs_bin"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Exercise real compressed OPKs without requiring a mounted root filesystem.
+# Only debugfs is replaced; it maps dump requests to a private directory and
+# deliberately reproduces debugfs's success-with-no-output failure mode.
+repo="$tmp/repo"
+backup_dir="$tmp/work"
+rootfs_files="$tmp/rootfs"
+image_root="$tmp/image"
+funkey_rootfs="$tmp/rootfs.ext2"
+filesystem_time=1700000000
+variant_version=test-iroh
+host_bin="$tmp/bin"
+commands="$tmp/commands"
+mkdir -p "$repo/images" "$backup_dir" "$image_root" "$host_bin"
+cp -a "$source_repo/tools/funkey-iroh/target-rootfs" "$rootfs_files"
+export TEST_IMAGE_ROOT="$image_root"
+cat > "$host_bin/debugfs" <<'MOCK'
+#!/bin/bash
+set -eu
+read -r operation source destination <<< "$2"
+[[ "$1" = -R && "$operation" = dump ]]
+# Match the real tool: a missing inode need not yield a nonzero exit code.
+[[ -s "$TEST_IMAGE_ROOT$source" ]] || exit 0
+cp "$TEST_IMAGE_ROOT$source" "$destination"
+MOCK
+chmod +x "$host_bin/debugfs"
+debugfs_bin="$host_bin/debugfs"
+
+for system in gba picoarch; do
+    stage="$repo/FunKey/package/picoarch/opk/$system"
+    mkdir -p "$stage" "$image_root/usr/local/share/OPKs/Libretro"
+    cat > "$stage/test.desktop" <<EOF
+[Desktop Entry]
+Name=Test $system
+Type=Application
+Exec=/usr/games/picoarch %f
+EOF
+    name="${system}_picoarch_funkey-s.opk"
+    [[ "$system" != picoarch ]] || name=picoarch_funkey-s.opk
+    "$mksquashfs_bin" "$stage" "$image_root/usr/local/share/OPKs/Libretro/$name" \
+        -processors 1 -all-root -noappend -no-exports -no-xattrs -quiet >/dev/null
+done
+ui_opk="$tmp/ui.opk"
+cp "$image_root/usr/local/share/OPKs/Libretro/picoarch_funkey-s.opk" "$ui_opk"
+ui_binary="$tmp/ui"
+printf 'ui-test-fixture\n' > "$ui_binary"
+: > "$commands"
+. "$augment" prepare
+[[ "$wrapped_count" -eq 2 ]]
+grep -Fq '/Libretro/picoarch_funkey-s.opk' "$wrapped_manifest"
+! grep -Fq 'picoarch_picoarch_funkey-s.opk' "$wrapped_manifest"
+
+# Apply the generated write commands to the private image directory.
+while read -r operation source destination; do
+    [[ "$operation" = write ]] || continue
+    mkdir -p "$(dirname "$image_root$destination")"
+    cp "$source" "$image_root$destination"
+done < "$commands"
+dump_and_compare() {
+    cmp "$3" "$image_root$2"
+}
+. "$augment" verify
+printf 'test-iroh-opk: regular and generic compressed launchers PASS\n'
+
+# Matching filenames alone cannot validate content: corruption must fail.
+generic_opk="$image_root/usr/local/share/OPKs/Libretro/picoarch_funkey-s.opk"
+cp "$generic_opk" "$tmp/good.opk"
+printf 'corrupt' >> "$generic_opk"
+if (. "$augment" verify) >"$tmp/corrupt.log" 2>&1; then
+    echo 'test-iroh-opk: accepted corrupted OPK' >&2
+    exit 1
+fi
+grep -q 'checksum mismatch' "$tmp/corrupt.log"
+cp "$tmp/good.opk" "$generic_opk"
+
+# A valid compressed archive with no launch hook must fail even when its
+# digest is correctly recorded, rather than passing a binary strings scan.
+wrong_opk="$image_root/usr/local/share/OPKs/Libretro/gba_picoarch_funkey-s.opk"
+cp "$ui_opk" "$wrong_opk"
+wrong_sha=$(sha256sum "$wrong_opk" | awk '{print $1}')
+awk -F '\t' -v OFS='\t' -v hash="$wrong_sha" \
+    '$1 == "gba" {$4=hash} {print}' "$wrapped_manifest" > "$tmp/wrong.tsv"
+mv "$tmp/wrong.tsv" "$wrapped_manifest"
+if (. "$augment" verify) >"$tmp/hook.log" 2>&1; then
+    echo 'test-iroh-opk: accepted missing desktop launch hook' >&2
+    exit 1
+fi
+grep -q 'lacks Iroh launch hook' "$tmp/hook.log"
+
+# A status-zero dump with no output must fail before attempting unsquashfs.
+rm -f "$wrong_opk" "$backup_dir/opks/gba.opk"
+if (. "$augment" prepare) >"$tmp/missing.log" 2>&1; then
+    echo 'test-iroh-opk: accepted missing expected launcher' >&2
+    exit 1
+fi
+grep -q 'failed to extract expected launcher' "$tmp/missing.log"
+printf 'test-iroh-opk: corruption, missing hook, and missing inode rejected PASS\n'
