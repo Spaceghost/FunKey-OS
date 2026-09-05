@@ -1,0 +1,80 @@
+name: RC host toolchain probe
+
+on:
+  push:
+    branches: [fix/rc-host-toolchain]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: ghcr.io/spaceghost/funkey-os-build@sha256:7abb83f775219b39a777ae9950ce1f2151587e999e46fdcfecfce8ba316cd2d4
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise code generation and Meson-style macro probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p probe
+          printf 'int main(void) { return 0; }\n' > probe/main.c
+          printf '#include <iostream>\nint main() { std::cout << "ok"; }\n' > probe/main.cpp
+          for candidate in legacy clang baseline target; do
+            case "$candidate" in
+              legacy) flags=(-march=x86_64) ;;
+              clang) flags=(-march=x86-64) ;;
+              baseline) flags=(-mcpu=baseline) ;;
+              target) flags=(-target x86_64-linux-gnu) ;;
+            esac
+            for driver in cc c++; do
+              source=probe/main.c
+              [[ "$driver" = cc ]] || source=probe/main.cpp
+              for phase in macros link; do
+                args=(-E -dM -x c /dev/null)
+                [[ "$phase" = macros ]] || args=("$source" -o probe/main)
+                status=0
+                zig "$driver" "${flags[@]}" "${args[@]}" \
+                  >"probe/$candidate-$driver-$phase.out" \
+                  2>"probe/$candidate-$driver-$phase.err" || status=$?
+                if [[ "$phase" = link && "$status" = 0 ]]; then
+                  ./probe/main >/dev/null || status=$?
+                fi
+                printf '%s %s %s exit=%s\n' "$candidate" "$driver" "$phase" "$status" | tee -a probe/results.txt
+                head -c 600 "probe/$candidate-$driver-$phase.err"
+                printf '\n'
+              done
+            done
+          done
+          python3 - <<'PY'
+          import pathlib, subprocess, tarfile
+          root = pathlib.Path('.')
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          with tarfile.open('probe/source-text.tar.gz', 'w:gz') as archive:
+              for name in paths:
+                  path = root / name
+                  if not path.is_file() or path.stat().st_size > 2_000_000:
+                      continue
+                  if path.suffix.lower() in {'.ttf', '.otf', '.woff', '.woff2', '.bdf', '.pcf'}:
+                      continue
+                  data = path.read_bytes()
+                  if b'\0' in data:
+                      continue
+                  try:
+                      data.decode('utf-8')
+                  except UnicodeDecodeError:
+                      continue
+                  archive.add(path, arcname=name, recursive=False)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RC compiler probe
+          path: probe/
