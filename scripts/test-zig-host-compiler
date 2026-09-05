@@ -1,0 +1,53 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# An optional directory exercises the installed wrappers used by Buildroot.
+# Otherwise install private copies, so this test never mutates build outputs.
+bin=${1:-"$tmp/bin"}
+if [[ "$#" -eq 0 ]]; then
+    "$repo/scripts/install-zig-host-tools" "$bin"
+fi
+
+for name in zig-host-cc zig-host-c++; do
+    compiler="$bin/$name"
+    test -x "$compiler"
+    language=c
+    [[ "$name" = zig-host-cc ]] || language=c++
+
+    # Meson 0.56 feeds an empty stdin without -x. Zig's normal file-input
+    # path can work while this separate preprocessor path rejects CPU flags.
+    "$compiler" -E -dM - </dev/null > "$tmp/$name-stdin.macros"
+    "$compiler" -E -dM -x "$language" /dev/null > "$tmp/$name-file.macros"
+    grep -q '^#define __clang__ ' "$tmp/$name-stdin.macros"
+    if [[ "$language" = c++ ]]; then
+        grep -q '^#define __cplusplus ' "$tmp/$name-file.macros"
+    fi
+
+    # A caller must not reintroduce the runner's native CPU features into
+    # cached host tools. Check macros as well as a linked, runnable executable.
+    "$compiler" -march=native -mtune=native -mcpu=native \
+        -E -dM - </dev/null > "$tmp/$name-portable.macros"
+    if [[ "$(uname -m)" = x86_64 ]]; then
+        if grep -Eq '^#define __(AVX|AVX2|AVX512F|SSE4_1|SSE4_2)__ ' \
+            "$tmp/$name-portable.macros"; then
+            echo "test-zig-host-compiler: non-baseline x86 features in $name" >&2
+            exit 1
+        fi
+    fi
+
+    cat > "$tmp/main.$language" <<'SOURCE'
+#include <stdio.h>
+int main(void) {
+    return puts("portable host compiler") < 0;
+}
+SOURCE
+    "$compiler" -march=native -mtune=native -mcpu=native \
+        -x "$language" "$tmp/main.$language" -o "$tmp/$name"
+    "$tmp/$name" > "$tmp/$name.out"
+    grep -qx 'portable host compiler' "$tmp/$name.out"
+    printf 'test-zig-host-compiler: %s preprocessing and executable PASS\n' "$name"
+done

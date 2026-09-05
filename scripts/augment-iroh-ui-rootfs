@@ -69,14 +69,22 @@ EOF
     for source_directory in "$source_root"/*; do
         [[ -d "$source_directory" ]] || continue
         system=$(basename "$source_directory")
-        embedded="/usr/local/share/OPKs/Libretro/${system}_picoarch_funkey-s.opk"
+        if [[ "$system" = picoarch ]]; then
+            opk_name=picoarch_funkey-s.opk
+        else
+            opk_name="${system}_picoarch_funkey-s.opk"
+        fi
+        embedded="/usr/local/share/OPKs/Libretro/$opk_name"
         local_opk="$backup_dir/opks/${system}.opk"
         unpack="$backup_dir/unpacked/$system"
         patched_opk="$backup_dir/opks/${system}.wrapped.opk"
 
+        # debugfs can exit successfully even when the requested inode is
+        # absent. Require the output as well as a successful command.
         if ! "$debugfs_bin" -R "dump $embedded $local_opk" "$funkey_rootfs" \
-            >/dev/null 2>&1; then
-            continue
+            >/dev/null 2>&1 || [[ ! -s "$local_opk" ]]; then
+            printf 'failed to extract expected launcher: %s\n' "$embedded" >&2
+            return 1
         fi
 
         rm -rf "$unpack"
@@ -146,10 +154,19 @@ verify)
             printf 'wrapped OPK checksum mismatch for %s\n' "$system" >&2
             return 1
         }
-        strings "$dump" | grep -q 'funkey-iroh-launch' || {
+        # OPKs are compressed SquashFS filesystems, not searchable text.
+        # Verify the actual desktop entry after extracting the read-back copy.
+        verified_unpack="$backup_dir/verified-$system"
+        rm -rf "$verified_unpack"
+        "$unsquashfs_bin" -no-progress -d "$verified_unpack" "$dump" >/dev/null
+        verified_desktop=$(find "$verified_unpack" -maxdepth 2 -type f \
+            -name '*.desktop' -print -quit)
+        if [[ -z "$verified_desktop" ]] ||
+           ! grep -Fq "Exec=/usr/bin/funkey-iroh-launch --system $system -- " "$verified_desktop" ||
+           ! grep -Fxq "X-FunKey-Iroh-System=$system" "$verified_desktop"; then
             printf 'wrapped OPK lacks Iroh launch hook: %s\n' "$system" >&2
             return 1
-        }
+        fi
     done < "$wrapped_manifest"
 
     cp "$ui_binary" "$repo/images/funkey-iroh-ui-${variant_version}"
