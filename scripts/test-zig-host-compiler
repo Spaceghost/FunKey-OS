@@ -51,3 +51,31 @@ SOURCE
     grep -qx 'portable host compiler' "$tmp/$name.out"
     printf 'test-zig-host-compiler: %s preprocessing and executable PASS\n' "$name"
 done
+
+# util-linux must not mistake Linux libc namespace functions for missing
+# symbols and compile fallback definitions over their real declarations.
+# Reproduce AC_CHECK_FUNCS, including its deliberately unprototyped call.
+# These programs are linked only: never invoke a namespace-changing syscall.
+if [[ "$(uname -s)" = Linux ]]; then
+    for function in unshare setns; do
+        cat > "$tmp/$function.c" <<SOURCE
+#define _GNU_SOURCE 1
+#include <limits.h>
+#undef $function
+#ifdef __cplusplus
+extern "C"
+#endif
+char $function();
+#if defined __stub_$function || defined __stub___$function
+#error $function is a libc stub
+#endif
+int main(void) { return $function(); }
+SOURCE
+        if ! "$bin/zig-host-cc" -O2 "$tmp/$function.c" -o "$tmp/$function"; then
+            echo "test-zig-host-compiler: libc link probe failed: $function" >&2
+            "$bin/zig-host-cc" -v "$tmp/$function.c" -o "$tmp/$function" || :
+            exit 1
+        fi
+        printf 'test-zig-host-compiler: libc %s link probe PASS\n' "$function"
+    done
+fi
