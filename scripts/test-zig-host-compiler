@@ -52,6 +52,22 @@ SOURCE
     printf 'test-zig-host-compiler: %s preprocessing and executable PASS\n' "$name"
 done
 
+# The glibc build host supplies libcrypt separately from libc. util-linux
+# adds it to LIBS before checking namespace functions. Verify both the native
+# header search and that exact link environment, not just an isolated symbol.
+namespace_libs=()
+if [[ "$(uname -s)" = Linux ]] && getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+    namespace_libs=(-lutil -lcrypt)
+    cat > "$tmp/crypt.c" <<'SOURCE'
+#include <crypt.h>
+int main(void) {
+    return crypt("compiler-probe", "xx") == 0;
+}
+SOURCE
+    "$bin/zig-host-cc" -O2 "$tmp/crypt.c" -lcrypt -o "$tmp/crypt"
+    printf 'test-zig-host-compiler: native crypt.h and libcrypt PASS\n'
+fi
+
 # util-linux must not mistake Linux libc namespace functions for missing
 # symbols and compile fallback definitions over their real declarations.
 # Reproduce AC_CHECK_FUNCS, including its deliberately unprototyped call.
@@ -71,9 +87,11 @@ char $function();
 #endif
 int main(void) { return $function(); }
 SOURCE
-        if ! "$bin/zig-host-cc" -O2 "$tmp/$function.c" -o "$tmp/$function"; then
+        if ! "$bin/zig-host-cc" -O2 "$tmp/$function.c" \
+            "${namespace_libs[@]}" -o "$tmp/$function"; then
             echo "test-zig-host-compiler: libc link probe failed: $function" >&2
-            "$bin/zig-host-cc" -v "$tmp/$function.c" -o "$tmp/$function" || :
+            "$bin/zig-host-cc" -v "$tmp/$function.c" \
+                "${namespace_libs[@]}" -o "$tmp/$function" || :
             exit 1
         fi
         printf 'test-zig-host-compiler: libc %s link probe PASS\n' "$function"
