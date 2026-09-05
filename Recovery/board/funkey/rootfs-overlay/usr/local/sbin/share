@@ -9,9 +9,6 @@ LOCK_FILE=/var/lock/share.lock
 source /usr/local/lib/utils
 source usb_gadget
 
-# The USB network interface file
-USB_IF=/etc/network/interfaces.d/usb0
-
 # The USB mass storage backing store file or partition
 BACKING_STORE_FILE=/sys/kernel/config/usb_gadget/FunKey/functions/mass_storage.mmcblk0p4/lun.0/file
 
@@ -70,8 +67,10 @@ init_share () {
 # Stop sharing the backing store partition
 stop_share () {
 
-    # Stop sharing the backing store partition
-    echo > $BACKING_STORE_FILE || die 11 "the backing store partition is still mounted on host"
+    # The network-only profile has no mass-storage function to detach.
+    if [ -e "$BACKING_STORE_FILE" ]; then
+	echo > "$BACKING_STORE_FILE" || die 11 "the backing store partition is still mounted on host"
+    fi
 
     # 3) Mount the backing store partition locally
     mount_share
@@ -84,10 +83,10 @@ stop_share () {
 # Start sharing the backing store partition
 start_share () {
 
+    [ -e "$BACKING_STORE_FILE" ] || die 10 "USB mass storage is disabled in this profile"
+
     # 1) Check if the backing store partition is already shared
-    if [ -e $BACKING_STORE_FILE ]; then
-	cat $BACKING_STORE_FILE | egrep -q ^/dev/mmcblk0p4 && die 12 "the backing store partition is already shared"
-    fi
+    cat "$BACKING_STORE_FILE" | egrep -q ^/dev/mmcblk0p4 && die 12 "the backing store partition is already shared"
 
     # 2) Check if USB data is connected
     is_usb_data_connected > /dev/null 2>&1 || die 13 "USB sharing impossible, not connected to a host"
@@ -97,17 +96,17 @@ start_share () {
 
     # 4) Everything is now clear to start sharing the backing store partition
     info "start sharing the backing store partition"
-    echo /dev/mmcblk0p4 > $BACKING_STORE_FILE || die 14 "cannot share the backing store partition"
+    echo /dev/mmcblk0p4 > "$BACKING_STORE_FILE" || die 14 "cannot share the backing store partition"
 }
 
 # Return if currently sharing
 is_share_started () {
 
-    if [ ! -e $BACKING_STORE_FILE ]; then
+    if [ ! -e "$BACKING_STORE_FILE" ]; then
 	echo "no"
 	return 1
     fi
-    cat $BACKING_STORE_FILE | egrep -q ^/dev/mmcblk0p4
+    cat "$BACKING_STORE_FILE" | egrep -q ^/dev/mmcblk0p4
     local res=$?
     if [ "$res" == "0" ]; then
         echo "yes"

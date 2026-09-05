@@ -202,8 +202,13 @@ copy_files_to_usb_partition () {
 	mount /mnt/ || die_notif 16 "Cannot mount /mnt"
     fi
 
-    # Copy freeware games and other necessary mnt files
-    unzip -q -o /usr/local/share/freeware_games.zip -d /mnt/
+    # Custom images may inject the optional freeware pack. Public firmware
+    # keeps it separate so static game data is not shipped in every update.
+    if [ -f /usr/local/share/freeware_games.zip ]; then
+	unzip -q -o /usr/local/share/freeware_games.zip -d /mnt/
+    fi
+
+    # Copy the files required by the launcher and emulators.
     unzip -q -o /usr/local/share/funkey_files.zip -d /mnt/
 
     # Copy OPKs

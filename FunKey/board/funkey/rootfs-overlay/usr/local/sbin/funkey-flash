@@ -1,0 +1,64 @@
+#!/bin/sh
+
+set -u
+
+SELF=${SELF:-$(basename "$0")}
+. /usr/local/lib/utils
+. /usr/local/lib/firmware_update
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_snapshot >/dev/null 2>&1 || usb_debug_snapshot() { :; }
+command -v usb_debug_set_update_state >/dev/null 2>&1 || usb_debug_set_update_state() { :; }
+command -v usb_debug_flush >/dev/null 2>&1 || usb_debug_flush() { :; }
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 /mnt/FunKey-<version>.fwu" >&2
+    exit 2
+fi
+
+requested=$1
+case "$requested" in
+    /mnt/FunKey-*.fwu) ;;
+    *) die 2 "update must be a FunKey-*.fwu file in /mnt" ;;
+esac
+
+[ -f "$requested" ] || die 2 "update is not a regular file: $requested"
+grep -qs '[[:space:]]/mnt[[:space:]]' /proc/mounts ||
+    die 2 "/mnt is not mounted locally"
+
+usb_debug_set_update_state flash-requested
+usb_debug_log flash "requested=$requested"
+usb_debug_snapshot flash-requested
+
+# Recovery's automatic installer intentionally accepts exactly one update.
+# Apply the same rule here so a network-triggered reboot can never select a
+# different archive from the one the operator requested.
+find_firmware_update /mnt
+selection_status=$?
+if [ "$selection_status" -eq 2 ]; then
+    usb_debug_set_update_state multiple-updates
+    die 2 "multiple FunKey-*.fwu files found in /mnt; keep exactly one"
+fi
+if [ "$selection_status" -ne 0 ] || [ "$FIRMWARE_UPDATE_FILE" != "$requested" ]; then
+    usb_debug_set_update_state update-selection-failed
+    die 2 "requested update is not the sole firmware archive in /mnt"
+fi
+
+info "validating complete firmware archive before entering Recovery"
+if ! validate_firmware_update "$requested"; then
+    usb_debug_set_update_state validation-failed
+    usb_debug_snapshot flash-validation-failed
+    die 3 "firmware validation failed"
+fi
+
+usb_debug_set_update_state rebooting-recovery
+usb_debug_log flash "validation complete; entering Recovery"
+usb_debug_snapshot before-recovery
+usb_debug_flush >/dev/null 2>&1 || :
+sync
+info "firmware validated; rebooting into Recovery for installation"
+exec recovery_mode

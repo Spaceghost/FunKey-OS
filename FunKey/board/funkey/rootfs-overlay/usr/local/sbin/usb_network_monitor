@@ -1,0 +1,174 @@
+#!/bin/sh
+
+USB_NETWORK_LIB=${USB_NETWORK_LIB:-/usr/local/lib/usb_network}
+. "$USB_NETWORK_LIB"
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_enabled >/dev/null 2>&1 || usb_debug_enabled() { return 1; }
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_run >/dev/null 2>&1 ||
+    usb_debug_run() { shift; "$@"; }
+
+USB_NETWORK_INIT_DIR=${USB_NETWORK_INIT_DIR:-/etc/init.d}
+USB_NETWORK_POLL_SECONDS=${USB_NETWORK_POLL_SECONDS:-1}
+USB_NETWORK_DHCPCD_PIDFILE=${USB_NETWORK_DHCPCD_PIDFILE:-/var/run/dhcpcd/pid}
+USB_NETWORK_DROPBEAR_PIDFILE=${USB_NETWORK_DROPBEAR_PIDFILE:-/var/run/dropbear.pid}
+usb_network_state=unknown
+
+pidfile_process_is_running()
+{
+    local service_pid
+
+    [ -r "$1" ] || return 1
+    service_pid=
+    IFS= read -r service_pid < "$1" || return 1
+    case "$service_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$service_pid" 2>/dev/null
+}
+
+usb_network_services_are_running()
+{
+    pidfile_process_is_running "$USB_NETWORK_DHCPCD_PIDFILE" &&
+        pidfile_process_is_running "$USB_NETWORK_DROPBEAR_PIDFILE"
+}
+
+dropbear_init_script()
+{
+    if [ -x "$USB_NETWORK_INIT_DIR/S42dropbear" ]; then
+        printf '%s\n' "$USB_NETWORK_INIT_DIR/S42dropbear"
+    else
+        printf '%s\n' "$USB_NETWORK_INIT_DIR/S50dropbear"
+    fi
+}
+
+run_usb_network_service()
+{
+    usb_network_component=$1
+    shift
+    if usb_debug_enabled; then
+        usb_debug_log "$usb_network_component" "invoking command=$*"
+        "$@"
+        usb_network_service_status=$?
+        usb_debug_log "$usb_network_component" "completed status=$usb_network_service_status"
+        return "$usb_network_service_status"
+    fi
+    "$@" >/dev/null 2>&1
+}
+
+start_usb_network_services()
+{
+    local dropbear_init
+
+    usb_debug_log usb-network "starting dhcpcd"
+    run_usb_network_service usb-dhcpcd-start \
+        "$USB_NETWORK_INIT_DIR/S41dhcpcd" start || {
+        usb_debug_log usb-network "dhcpcd start failed"
+        return 1
+    }
+
+    if ! usb_network_is_ready; then
+        usb_debug_log usb-network "usb0 not ready after dhcpcd start"
+        return 1
+    fi
+
+    dropbear_init=$(dropbear_init_script)
+    usb_debug_log usb-network "starting dropbear script=$dropbear_init"
+    run_usb_network_service usb-dropbear-start "$dropbear_init" start || {
+        usb_debug_log usb-network "dropbear start failed"
+        return 1
+    }
+    usb_debug_log usb-network "services started"
+}
+
+stop_usb_network_services()
+{
+    local service_status=0 dropbear_init
+
+    dropbear_init=$(dropbear_init_script)
+    usb_debug_log usb-network "stopping services"
+    run_usb_network_service usb-dropbear-stop "$dropbear_init" stop ||
+        service_status=1
+    run_usb_network_service usb-dhcpcd-stop \
+        "$USB_NETWORK_INIT_DIR/S41dhcpcd" stop || service_status=1
+
+    if pidfile_process_is_running "$USB_NETWORK_DROPBEAR_PIDFILE" ||
+       pidfile_process_is_running "$USB_NETWORK_DHCPCD_PIDFILE"; then
+        sleep 1
+    fi
+    pidfile_process_is_running "$USB_NETWORK_DROPBEAR_PIDFILE" &&
+        service_status=1
+    pidfile_process_is_running "$USB_NETWORK_DHCPCD_PIDFILE" &&
+        service_status=1
+    usb_debug_log usb-network "services stopped status=$service_status"
+    return "$service_status"
+}
+
+reconcile_usb_network()
+{
+    local next_state
+
+    if usb_network_is_ready; then
+        next_state=up
+    else
+        next_state=down
+    fi
+
+    if [ "$next_state" != "$usb_network_state" ]; then
+        usb_debug_log usb-network "link transition old=$usb_network_state new=$next_state"
+    fi
+
+    if [ "$next_state" = up ]; then
+        if [ "$usb_network_state" != up ] || ! usb_network_services_are_running; then
+            start_usb_network_services || {
+                usb_network_is_ready || {
+                    stop_usb_network_services || true
+                    usb_network_state=down
+                    return 0
+                }
+                usb_debug_log usb-network "service reconciliation failed while link remained up"
+                return 1
+            }
+        fi
+        usb_network_is_ready || {
+            usb_debug_log usb-network "link disappeared after service start"
+            stop_usb_network_services || true
+            usb_network_state=down
+            return 0
+        }
+    else
+        if [ "$usb_network_state" != down ] ||
+           pidfile_process_is_running "$USB_NETWORK_DROPBEAR_PIDFILE" ||
+           pidfile_process_is_running "$USB_NETWORK_DHCPCD_PIDFILE"; then
+            stop_usb_network_services || {
+                usb_debug_log usb-network "service stop reconciliation failed"
+                return 1
+            }
+        fi
+    fi
+    usb_network_state=$next_state
+}
+
+case "${1:-}" in
+    --once)
+        usb_network_state=${2:-unknown}
+        reconcile_usb_network
+        printf '%s\n' "$usb_network_state"
+        exit 0
+        ;;
+    --stop-services)
+        stop_usb_network_services
+        exit $?
+        ;;
+esac
+
+usb_debug_log usb-network "monitor started poll_seconds=$USB_NETWORK_POLL_SECONDS"
+trap 'usb_debug_log usb-network "monitor stopping"; exit 0' INT TERM
+while :; do
+    reconcile_usb_network || usb_debug_log usb-network "reconcile failed"
+    sleep "$USB_NETWORK_POLL_SECONDS"
+done

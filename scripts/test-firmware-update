@@ -1,0 +1,66 @@
+#!/bin/sh
+
+set -u
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+production_helper=$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/firmware_update
+recovery_helper=$repo/Recovery/board/funkey/rootfs-overlay/usr/local/lib/firmware_update
+test_dir=$(mktemp -d)
+trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
+
+fail()
+{
+    echo "firmware update selector test failed: $1" >&2
+    exit 1
+}
+
+cmp "$production_helper" "$recovery_helper" || fail "overlay helpers differ"
+. "$production_helper"
+
+find_firmware_update "$test_dir"
+[ "$?" -eq 1 ] || fail "empty directory was not reported as empty"
+[ -z "$FIRMWARE_UPDATE_FILE" ] || fail "empty directory selected a file"
+
+update="$test_dir/FunKey-update with spaces.fwu"
+touch "$update"
+find_firmware_update "$test_dir"
+[ "$?" -eq 0 ] || fail "one update was not selected"
+[ "$FIRMWARE_UPDATE_FILE" = "$update" ] || fail "filename was split or changed"
+
+touch "$test_dir/FunKey-second.fwu"
+find_firmware_update "$test_dir"
+[ "$?" -eq 2 ] || fail "multiple updates were not rejected"
+[ -z "$FIRMWARE_UPDATE_FILE" ] || fail "multiple updates selected a file"
+
+rm -f "$test_dir/FunKey-second.fwu"
+mkdir "$test_dir/FunKey-directory.fwu"
+find_firmware_update "$test_dir"
+[ "$?" -eq 2 ] || fail "a file plus matching directory was not rejected"
+
+calls=
+swupdate()
+{
+    calls="${calls}${calls:+|}$*"
+    return 0
+}
+install_firmware_update "$update" || fail "valid preflight blocked installation"
+[ "$calls" = "-c -i $update|-i $update" ] || fail "preflight did not precede installation"
+
+calls=
+validate_firmware_update "$update" || fail "standalone preflight rejected valid update"
+[ "$calls" = "-c -i $update" ] || fail "standalone preflight used the wrong SWUpdate mode"
+
+calls=
+swupdate()
+{
+    calls="${calls}${calls:+|}$*"
+    [ "$1" != "-c" ]
+}
+if install_firmware_update "$update"; then
+    fail "failed preflight was accepted"
+fi
+[ "$calls" = "-c -i $update" ] || fail "installation ran after failed preflight"
+
+"$repo/scripts/test-firmware-packaging" || fail "firmware packaging tests failed"
+
+echo "firmware update selector tests passed"

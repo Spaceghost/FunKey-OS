@@ -1,6 +1,7 @@
 #!/bin/sh
 
 source /usr/local/lib/utils
+source /usr/local/lib/firmware_update
 
 # Get a key
 getkey() {
@@ -134,15 +135,18 @@ menu_run () {
 		if [ $? -ne 0 ]; then
 		    notif set 0 "${message}...^CANNOT UNMOUNT USB!"
 		else
-		    for file in $(ls /mnt/FunKey-*.fwu); do
-			swupdate -i "${file}"
-			if [ $? -ne 0 ]; then
-			    notif set 0 display 10 "${message}...^         CORRUPTED^        UPDATE FILE"
-			    rm -f "${file}"
+		    find_firmware_update /mnt
+		    update_status=$?
+		    if [ ${update_status} -eq 2 ]; then
+			notif display 10 "      MULTIPLE UPDATE FILES^       KEEP ONLY ONE .FWU"
+		    elif [ ${update_status} -eq 0 ]; then
+			if install_firmware_update "${FIRMWARE_UPDATE_FILE}"; then
 			    notif set 0 "^^^^^^^^         RESTARTING...^^^^^^^^"
 			    normal_mode
+			else
+			    notif display 10 "         CORRUPTED^        UPDATE FILE"
 			fi
-		    done
+		    fi
 		    message=" USB MOUNT"
 		    notif set 0 "${message}"
 		fi

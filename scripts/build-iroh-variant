@@ -1,0 +1,363 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+base_version=${1:?usage: build-iroh-variant VERSION [VARIANT [USB_PROFILE]]}
+variant=${2:-iroh}
+usb_profile_argument=${3:-}
+variant_version="${base_version}-${variant}"
+manifest="$repo/tools/funkey-iroh/Cargo.toml"
+target=${FUNKEY_IROH_RUST_TARGET:-arm-unknown-linux-musleabihf}
+toolchain=${FUNKEY_IROH_RUST_TOOLCHAIN:-1.91.0}
+host_bin=${FUNKEY_IROH_HOST_BIN:-"$repo/FunKey/output/host/bin"}
+linker=${FUNKEY_IROH_LINKER:-"$host_bin/arm-linux-gcc"}
+archiver=${FUNKEY_IROH_AR:-"$host_bin/arm-linux-ar"}
+stripper=${FUNKEY_IROH_STRIP:-"$host_bin/arm-linux-strip"}
+debugfs_bin=${DEBUGFS:-"$repo/FunKey/output/host/sbin/debugfs"}
+e2fsck_bin=${E2FSCK:-"$repo/FunKey/output/host/sbin/e2fsck"}
+readelf_bin=${READELF:-readelf}
+mksquashfs_bin=${MKSQUASHFS:-"$repo/FunKey/output/host/bin/mksquashfs"}
+sdl_config=${FUNKEY_IROH_SDL_CONFIG:-"$repo/FunKey/output/staging/usr/bin/sdl-config"}
+filesystem_time=${SOURCE_DATE_EPOCH:-$(git -C "$repo" log -1 --format=%ct)}
+source_commit=$(git -C "$repo" rev-parse HEAD)
+source_tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+funkey_rootfs="$repo/FunKey/output/images/rootfs.ext2"
+recovery_rootfs="$repo/Recovery/output/images/rootfs.ext2"
+crate_dir="$repo/tools/funkey-iroh"
+ui_dir="$repo/tools/funkey-iroh-ui"
+target_dir=${CARGO_TARGET_DIR:-"$repo/.cargo-target/funkey-iroh"}
+binary="$target_dir/$target/release/funkey-iroh"
+rootfs_files="$crate_dir/target-rootfs"
+backup_dir=$(mktemp -d "$repo/.iroh-variant.XXXXXX")
+funkey_backup="$backup_dir/FunKey.rootfs.ext2"
+recovery_backup="$backup_dir/Recovery.rootfs.ext2"
+ui_binary="$backup_dir/funkey-iroh-ui"
+ui_opk="$backup_dir/funkey-iroh-ui.opk"
+original_picoarch="$backup_dir/picoarch.real"
+size_budget=${FUNKEY_IROH_SIZE_BUDGET:-"$repo/scripts/firmware-size-budget-iroh.json"}
+
+case "$variant" in
+    ''|*[!A-Za-z0-9._-]*)
+        printf 'invalid Iroh variant name: %s\n' "$variant" >&2
+        exit 2
+        ;;
+esac
+
+if [[ -n "$usb_profile_argument" ]]; then
+    case "$usb_profile_argument" in
+        /*) usb_profile=$usb_profile_argument ;;
+        *) usb_profile=$repo/$usb_profile_argument ;;
+    esac
+    [[ -r "$usb_profile" ]] || {
+        printf 'USB profile is missing or unreadable: %s\n' "$usb_profile" >&2
+        exit 2
+    }
+else
+    usb_profile=
+fi
+
+restore_rootfs()
+{
+    if [[ -e "$funkey_backup" ]]; then
+        cp --reflink=auto --sparse=always "$funkey_backup" "$funkey_rootfs"
+    fi
+    if [[ -e "$recovery_backup" ]]; then
+        cp --reflink=auto --sparse=always "$recovery_backup" "$recovery_rootfs"
+    fi
+    rm -rf "$backup_dir"
+}
+trap restore_rootfs EXIT
+
+for tool in \
+    cargo rustc "$linker" "$archiver" "$debugfs_bin" "$e2fsck_bin" \
+    "$readelf_bin" "$mksquashfs_bin" "$sdl_config"
+do
+    if [[ "$tool" == */* ]]; then
+        [[ -x "$tool" ]] || {
+            printf 'required tool is missing or not executable: %s\n' "$tool" >&2
+            exit 127
+        }
+    elif ! command -v "$tool" >/dev/null 2>&1; then
+        printf 'required tool is missing from PATH: %s\n' "$tool" >&2
+        exit 127
+    fi
+done
+
+for image in "$funkey_rootfs" "$recovery_rootfs"; do
+    [[ -f "$image" ]] || {
+        printf 'completed rootfs image is missing: %s\n' "$image" >&2
+        exit 2
+    }
+done
+[[ "$filesystem_time" =~ ^[0-9]+$ ]] || {
+    printf 'invalid filesystem timestamp: %s\n' "$filesystem_time" >&2
+    exit 2
+}
+
+cargo_command=(cargo)
+rustc_command=(rustc)
+if command -v rustup >/dev/null 2>&1 && [[ -n "$toolchain" ]]; then
+    cargo_command+=("+$toolchain")
+    rustc_command+=("+$toolchain")
+fi
+
+rust_version=$("${rustc_command[@]}" --version)
+case "$rust_version" in
+    "rustc 1.91."*) ;;
+    *)
+        printf 'funkey-iroh requires Rust 1.91.x; selected compiler is: %s\n' \
+            "$rust_version" >&2
+        exit 2
+        ;;
+esac
+
+lock_flag=()
+if [[ -f "$crate_dir/Cargo.lock" ]]; then
+    lock_flag=(--locked)
+else
+    printf 'warning: Cargo.lock is absent; generating one for this build\n' >&2
+fi
+
+mkdir -p "$target_dir"
+export CARGO_TARGET_DIR="$target_dir"
+export CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$linker"
+export CC_arm_unknown_linux_musleabihf="$linker"
+export AR_arm_unknown_linux_musleabihf="$archiver"
+
+# Zig's GCC-compatible driver spells LLVM CPU names with underscores while
+# a conventional GCC cross-toolchain expects the documented hyphenated form.
+# The generated FunKey zig cc wrapper reports either Zig or Clang here.
+compiler_banner=$("$linker" --version 2>&1 | head -n 1 || true)
+case "$compiler_banner" in
+    *[Zz]ig*|*[Cc]lang*) c_target_cpu=cortex_a7 ;;
+    *) c_target_cpu=cortex-a7 ;;
+esac
+printf 'Iroh C compiler: %s (cpu=%s)\n' "${compiler_banner:-unknown}" "$c_target_cpu"
+export CFLAGS_arm_unknown_linux_musleabihf="-mcpu=$c_target_cpu -mfpu=neon-vfpv4 -mfloat-abi=hard"
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=cortex-a7 -C target-feature=+neon,+vfp4 -C link-arg=-Wl,--gc-sections"
+
+printf 'building funkey-iroh with %s for %s\n' "$rust_version" "$target"
+"${cargo_command[@]}" build \
+    --manifest-path "$manifest" \
+    --target "$target" \
+    --release \
+    "${lock_flag[@]}"
+
+[[ -x "$binary" ]] || {
+    printf 'cargo did not produce an executable: %s\n' "$binary" >&2
+    exit 1
+}
+if [[ -x "$stripper" ]]; then
+    "$stripper" --strip-unneeded "$binary"
+fi
+if ! file "$binary" | grep -q 'ARM'; then
+    file "$binary" >&2
+    printf 'funkey-iroh binary is not an ARM executable\n' >&2
+    exit 1
+fi
+if "$readelf_bin" -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
+    "$readelf_bin" -d "$binary" >&2
+    printf 'funkey-iroh must be statically linked\n' >&2
+    exit 1
+fi
+
+binary_size=$(wc -c < "$binary")
+max_binary_size=${FUNKEY_IROH_MAX_BINARY_BYTES:-41943040}
+if (( binary_size > max_binary_size )); then
+    printf 'funkey-iroh is %d bytes, over the configured %d-byte ceiling\n' \
+        "$binary_size" "$max_binary_size" >&2
+    exit 1
+fi
+binary_sha=$(sha256sum "$binary" | awk '{print $1}')
+
+read -r -a ui_cflags <<<"$("$sdl_config" --cflags)"
+read -r -a ui_libs <<<"$("$sdl_config" --libs)"
+"$linker" \
+    -std=gnu99 -Os -DNDEBUG -ffunction-sections -fdata-sections \
+    "${ui_cflags[@]}" \
+    "$ui_dir/main.c" \
+    -Wl,--gc-sections \
+    "${ui_libs[@]}" \
+    -lSDL_ttf -lasound -lm \
+    -o "$ui_binary"
+[[ -x "$ui_binary" ]] || {
+    printf 'UI compiler did not produce %s\n' "$ui_binary" >&2
+    exit 1
+}
+if [[ -x "$stripper" ]]; then
+    "$stripper" --strip-unneeded "$ui_binary"
+fi
+file "$ui_binary" | grep -q 'ARM' || {
+    file "$ui_binary" >&2
+    printf 'funkey-iroh-ui is not an ARM executable\n' >&2
+    exit 1
+}
+ui_size=$(wc -c < "$ui_binary")
+ui_sha=$(sha256sum "$ui_binary" | awk '{print $1}')
+
+opk_stage="$backup_dir/opk"
+mkdir -p "$opk_stage"
+cp "$ui_dir/opk/funkey-iroh.funkey-s.desktop" "$opk_stage/"
+cp "$ui_dir/opk/funkey-iroh.png" "$opk_stage/"
+touch -h -d "@$filesystem_time" "$opk_stage"/*
+"$mksquashfs_bin" "$opk_stage" "$ui_opk" \
+    -all-root -noappend -no-exports -no-xattrs \
+    -quiet >/dev/null
+
+chmod 0755 \
+    "$rootfs_files/etc/init.d/S44funkey-iroh" \
+    "$rootfs_files/usr/bin/funkey-iroh-service" \
+    "$rootfs_files/usr/bin/funkey-iroh-library" \
+    "$rootfs_files/usr/bin/funkey-iroh-ui-action" \
+    "$rootfs_files/usr/games/picoarch-iroh-wrapper" \
+    "$rootfs_files/usr/local/sbin/usb_gadget"
+chmod 0644 "$rootfs_files/etc/default/funkey-iroh"
+
+cp --reflink=auto --sparse=always "$funkey_rootfs" "$funkey_backup"
+if [[ -n "$usb_profile" ]]; then
+    cp --reflink=auto --sparse=always "$recovery_rootfs" "$recovery_backup"
+fi
+
+"$debugfs_bin" -R "dump /usr/games/picoarch $original_picoarch" \
+    "$funkey_rootfs" >/dev/null 2>&1 || {
+        printf 'failed to extract the existing PicoArch executable\n' >&2
+        exit 1
+    }
+chmod 0755 "$original_picoarch"
+
+commands="$backup_dir/debugfs-funkey.commands"
+cat > "$commands" <<EOF
+write $binary /usr/bin/funkey-iroh
+write $ui_binary /usr/bin/funkey-iroh-ui
+write $rootfs_files/usr/bin/funkey-iroh-service /usr/bin/funkey-iroh-service
+write $rootfs_files/usr/bin/funkey-iroh-library /usr/bin/funkey-iroh-library
+write $rootfs_files/usr/bin/funkey-iroh-ui-action /usr/bin/funkey-iroh-ui-action
+write $rootfs_files/etc/init.d/S44funkey-iroh /etc/init.d/S44funkey-iroh
+write $rootfs_files/etc/default/funkey-iroh /etc/default/funkey-iroh
+rm /usr/local/sbin/usb_gadget
+write $rootfs_files/usr/local/sbin/usb_gadget /usr/local/sbin/usb_gadget
+rm /usr/games/picoarch
+write $original_picoarch /usr/games/picoarch.real
+write $rootfs_files/usr/games/picoarch-iroh-wrapper /usr/games/picoarch
+write $ui_opk /usr/local/share/OPKs/Libretro/funkey-iroh-ui.opk
+EOF
+
+# Add pairing, inbox/outbox, post-game sync, and pre-game launch hooks
+# without replacing the hardened transport/debug variant builder.
+. "$repo/scripts/augment-iroh-ui-rootfs" prepare
+
+if [[ -n "$usb_profile" ]]; then
+    cat >> "$commands" <<EOF
+cd /etc/default
+rm usb-gadget
+write $usb_profile usb-gadget
+EOF
+fi
+
+E2FSPROGS_FAKE_TIME="$filesystem_time" \
+    "$debugfs_bin" -w -f "$commands" "$funkey_rootfs" \
+    >"$backup_dir/debugfs-funkey.log" 2>&1 || {
+        cat "$backup_dir/debugfs-funkey.log" >&2
+        exit 1
+    }
+
+if [[ -n "$usb_profile" ]]; then
+    recovery_commands="$backup_dir/debugfs-recovery.commands"
+    cat > "$recovery_commands" <<EOF
+cd /etc/default
+rm usb-gadget
+write $usb_profile usb-gadget
+EOF
+    E2FSPROGS_FAKE_TIME="$filesystem_time" \
+        "$debugfs_bin" -w -f "$recovery_commands" "$recovery_rootfs" \
+        >"$backup_dir/debugfs-recovery.log" 2>&1 || {
+            cat "$backup_dir/debugfs-recovery.log" >&2
+            exit 1
+        }
+fi
+
+dump_and_compare()
+{
+    local image=$1
+    local embedded_path=$2
+    local source_path=$3
+    local label=$4
+    local dump_path="$backup_dir/$label.embedded"
+
+    "$debugfs_bin" -R "dump $embedded_path $dump_path" "$image" >/dev/null 2>&1 || {
+        printf 'failed to read injected file %s back from %s\n' \
+            "$embedded_path" "$image" >&2
+        exit 1
+    }
+    cmp "$source_path" "$dump_path"
+}
+
+dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh "$binary" binary
+dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-ui "$ui_binary" ui
+dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-service \
+    "$rootfs_files/usr/bin/funkey-iroh-service" service
+dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-library \
+    "$rootfs_files/usr/bin/funkey-iroh-library" library
+dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-ui-action \
+    "$rootfs_files/usr/bin/funkey-iroh-ui-action" ui-action
+dump_and_compare "$funkey_rootfs" /usr/games/picoarch.real \
+    "$original_picoarch" picoarch-real
+dump_and_compare "$funkey_rootfs" /usr/games/picoarch \
+    "$rootfs_files/usr/games/picoarch-iroh-wrapper" picoarch-wrapper
+dump_and_compare "$funkey_rootfs" /usr/local/share/OPKs/Libretro/funkey-iroh-ui.opk \
+    "$ui_opk" opk
+. "$repo/scripts/augment-iroh-ui-rootfs" verify
+
+for image in "$funkey_rootfs" "$recovery_rootfs"; do
+    fsck_status=0
+    E2FSPROGS_FAKE_TIME="$filesystem_time" E2FSCK_TIME="$filesystem_time" \
+        "$e2fsck_bin" -pf "$image" >/dev/null || fsck_status=$?
+    if (( fsck_status > 1 )); then
+        exit "$fsck_status"
+    fi
+done
+
+make -C "$repo" -j1 package-image package-update package-checksums \
+    FUNKEY_VERSION="$variant_version"
+
+# Re-render the common footprint artifact against the explicitly named Iroh
+# budget. The normal package-checksums gate has already passed, so this can
+# only keep or tighten limits unless the reviewed budget is deliberately
+# changed in the same pull request.
+"$repo/scripts/firmware-size-report" "$variant_version" \
+    --budget "$size_budget"
+
+metadata="$repo/images/iroh-${variant_version}.json"
+cat > "$metadata.tmp" <<EOF
+{
+  "schema": 2,
+  "profile": "$variant",
+  "firmware_version": "$variant_version",
+  "source_commit": "$source_commit",
+  "source_tree": "$source_tree",
+  "binary": "/usr/bin/funkey-iroh",
+  "binary_bytes": $binary_size,
+  "binary_sha256": "$binary_sha",
+  "ui_binary": "/usr/bin/funkey-iroh-ui",
+  "ui_bytes": $ui_size,
+  "ui_sha256": "$ui_sha",
+  "library": "/mnt/FunKey/Shared Games",
+  "rust_target": "$target",
+  "rust_version": "$rust_version",
+  "iroh_version": "1.0.3",
+  "save_protocol": "funkey/saves/1",
+  "bundle_protocol": "funkey/bundles/1",
+  "netplay_protocol": "funkey/netplay/1",
+  "usb_profile": "$(basename "${usb_profile:-unchanged}")"
+}
+EOF
+mv "$metadata.tmp" "$metadata"
+
+(
+    cd "$repo/images"
+    sha256sum "$(basename "$metadata")" >> "SHA256SUMS-${variant_version}.txt"
+)
+
+printf 'created Iroh firmware variant %s\n' "$variant_version"
+printf 'daemon: %s bytes sha256=%s\n' "$binary_size" "$binary_sha"
+printf 'UI: %s bytes sha256=%s\n' "$ui_size" "$ui_sha"

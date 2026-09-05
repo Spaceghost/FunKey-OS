@@ -1,0 +1,62 @@
+name: RC regression tests
+
+on:
+  pull_request:
+    branches: [master, rg-nano-next]
+  push:
+    branches: [master, rg-nano-next]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: rc-preflight-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/spaceghost/funkey-os-build@sha256:7abb83f775219b39a777ae9950ce1f2151587e999e46fdcfecfce8ba316cd2d4
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+      - name: Install isolated test dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ninja-build squashfs-tools
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p preflight-logs
+      - name: Check compiler, packaging, and USB regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in test-zig-host-compiler test-iroh-opk test-firmware-update test-usb-network-hotplug test-usb-menu-info test-usb-debug test-usb-ssh-guard; do
+            ./scripts/$test 2>&1 | tee "preflight-logs/$test.log"
+          done
+          FUNKEY_IROH_RUNTIME_DIR="$RUNNER_TEMP/iroh-test" \
+          FUNKEY_IROH_ENDPOINT_LOCK="$RUNNER_TEMP/iroh-test.lock" \
+            ./scripts/test-iroh-ui 2>&1 | tee preflight-logs/test-iroh-ui.log
+      - name: Configure a real Meson 0.56 C and C++ project
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch 0.56.0 https://github.com/mesonbuild/meson.git "$RUNNER_TEMP/meson"
+          ./scripts/install-zig-host-tools "$RUNNER_TEMP/host-bin"
+          mkdir -p "$RUNNER_TEMP/meson-project"
+          printf "project('probe', 'c', 'cpp')\n" > "$RUNNER_TEMP/meson-project/meson.build"
+          CC="$RUNNER_TEMP/host-bin/zig-host-cc" CXX="$RUNNER_TEMP/host-bin/zig-host-c++" \
+            python3 "$RUNNER_TEMP/meson/meson.py" setup "$RUNNER_TEMP/meson-build" "$RUNNER_TEMP/meson-project" \
+            2>&1 | tee preflight-logs/meson.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RC regression evidence
+          path: preflight-logs/

@@ -1,0 +1,348 @@
+name: FunKey Iroh hardware loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Iroh build run containing the combined USB-debug firmware
+        required: true
+        type: string
+      device_host:
+        description: USB-debug address of the attached RG Nano
+        required: true
+        default: 192.168.137.2
+        type: string
+      log_prefix:
+        description: Safe filename prefix for collected evidence
+        required: true
+        default: funkey-iroh-hil
+        type: string
+  workflow_call:
+    inputs:
+      build_run_id:
+        description: Iroh build run containing the combined USB-debug firmware
+        required: true
+        type: string
+      device_host:
+        description: USB-debug address of the attached RG Nano
+        required: false
+        default: 192.168.137.2
+        type: string
+      log_prefix:
+        description: Safe filename prefix for collected evidence
+        required: false
+        default: funkey-iroh-hil
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: funkey-iroh-hardware
+  cancel-in-progress: false
+
+jobs:
+  flash-and-exercise:
+    runs-on: [self-hosted, linux, funkey-usb-debug]
+    environment: funkey-hardware
+    timeout-minutes: 45
+    env:
+      FUNKEY_DEBUG_HOST: ${{ inputs.device_host }}
+      FUNKEY_DEBUG_TIMEOUT: 360
+      LOG_PREFIX: ${{ inputs.log_prefix }}
+      LOG_DIR: hardware-logs
+      SSH_TARGET: root@${{ inputs.device_host }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Validate fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LOG_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]]
+          command -v ssh
+          command -v sftp
+          command -v sha256sum
+          command -v python3
+          mkdir -p "$LOG_DIR"
+
+      - name: Download selected Iroh build
+        uses: actions/download-artifact@v4
+        with:
+          name: FunKey-OS Iroh firmware
+          path: downloaded-iroh
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Select and verify combined debug firmware
+        id: firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t candidates < <(
+            find downloaded-iroh -type f \
+              -name 'FunKey-*-iroh-usb-debug.fwu' -print
+          )
+          (( ${#candidates[@]} == 1 ))
+          firmware=${candidates[0]}
+          checksum=$(find downloaded-iroh -type f \
+            -name 'SHA256SUMS-*-iroh-usb-debug.txt' -print -quit)
+          test -n "$checksum"
+          (
+            cd "$(dirname "$checksum")"
+            sha256sum -c "$(basename "$checksum")"
+          )
+          firmware_sha=$(sha256sum "$firmware" | awk '{print $1}')
+          printf 'firmware=%s\n' "$firmware" >> "$GITHUB_OUTPUT"
+          printf 'firmware_sha=%s\n' "$firmware_sha" >> "$GITHUB_OUTPUT"
+
+          mapfile -t metadata_candidates < <(
+            find downloaded-iroh -type f \
+              -name 'iroh-*-iroh-usb-debug.json' -print
+          )
+          (( ${#metadata_candidates[@]} == 1 ))
+          metadata=${metadata_candidates[0]}
+          python3 - "$metadata" <<'PY'
+          import json, pathlib, sys
+          data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert data["profile"] == "iroh-usb-debug"
+          assert data["bundle_protocol"] == "funkey/bundles/1"
+          assert data["source_commit"]
+          assert data["source_tree"]
+          PY
+          source_commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$metadata")
+          source_tree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_tree"])' "$metadata")
+          printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+          printf 'source_tree=%s\n' "$source_tree" >> "$GITHUB_OUTPUT"
+
+          native=$(find downloaded-iroh -type f \
+            -path '*/debug/funkey-iroh' -print -quit)
+          test -n "$native"
+          chmod +x "$native"
+          file "$native"
+          printf 'native=%s\n' "$native" >> "$GITHUB_OUTPUT"
+
+      - name: Use the exact source that produced the firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit=${{ steps.firmware.outputs.source_commit }}
+          source_tree=${{ steps.firmware.outputs.source_tree }}
+          git cat-file -e "$source_commit^{commit}" 2>/dev/null || \
+            git fetch origin "$source_commit"
+          git checkout --detach "$source_commit"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          test "$(git rev-parse 'HEAD^{tree}')" = "$source_tree"
+
+      - name: Flash, inspect Recovery, boot normal userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/funkey-usb-debug cycle \
+            "${{ steps.firmware.outputs.firmware }}" \
+            "$LOG_DIR/$LOG_PREFIX"
+
+      - name: Exercise UI, lifecycle, SFTP, bundles, and conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh_options=(
+            -o BatchMode=yes
+            -o ConnectTimeout=5
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o LogLevel=ERROR
+          )
+          ssh_device() {
+            ssh "${ssh_options[@]}" "$SSH_TARGET" "$@"
+          }
+
+          {
+            ssh_device 'set -eux
+              command -v funkey-iroh
+              command -v funkey-iroh-service
+              command -v funkey-iroh-library
+              command -v funkey-iroh-ui
+              funkey-iroh --version
+              funkey-iroh-ui --self-test
+              funkey-iroh-ui-action self-test
+              funkey-iroh-library self-test
+              test -e /lib/modules/*/kernel/drivers/usb/gadget/function/usb_f_ecm.ko \
+                -o -e /lib/modules/*/kernel/drivers/usb/gadget/function/usb_f_ecm.ko.xz
+              test -e /lib/modules/*/kernel/drivers/usb/gadget/function/usb_f_ncm.ko \
+                -o -e /lib/modules/*/kernel/drivers/usb/gadget/function/usb_f_ncm.ko.xz
+            '
+          } >"$LOG_DIR/$LOG_PREFIX-device-self-test.log" 2>&1
+
+          mkdir -p "$LOG_DIR/sftp"
+          printf 'sftp-roundtrip-%s\n' "$GITHUB_RUN_ID" \
+            > "$LOG_DIR/sftp/probe.txt"
+          cat > "$LOG_DIR/sftp/batch" <<EOF
+          -mkdir /mnt/FunKey/HIL
+          put $LOG_DIR/sftp/probe.txt /mnt/FunKey/HIL/sftp-probe.txt
+          get /mnt/FunKey/HIL/sftp-probe.txt $LOG_DIR/sftp/probe.returned.txt
+          EOF
+          sftp "${ssh_options[@]}" -b "$LOG_DIR/sftp/batch" "$SSH_TARGET"
+          cmp "$LOG_DIR/sftp/probe.txt" "$LOG_DIR/sftp/probe.returned.txt"
+
+          native="${{ steps.firmware.outputs.native }}"
+          host_state="$RUNNER_TEMP/funkey-iroh-host-$GITHUB_RUN_ID"
+          host_bundle="$RUNNER_TEMP/hil-host.funkey"
+          mkdir -p \
+            "$host_state/state" \
+            "$host_state/inbox" \
+            "$host_state/bundles" \
+            "$host_bundle/content" \
+            "$host_bundle/retroarch/saves" \
+            "$host_bundle/retroarch/states"
+          printf 'host-content\n' > "$host_bundle/content/HIL.gbc"
+          printf 'host-save\n' > "$host_bundle/retroarch/saves/HIL.srm"
+          printf 'host-state\n' > "$host_bundle/retroarch/states/HIL.state0"
+          cat > "$host_bundle/manifest.tsv" <<EOF
+          schema	1
+          kind	funkey-play-bundle
+          system	gbc
+          game	HIL
+          content	content/HIL.gbc
+          source_content	/hil/HIL.gbc
+          core	gambatte
+          core_path	/usr/games/gambatte_libretro.so
+          core_sha256	hil
+          created_unix	0
+          updated_unix	0
+          EOF
+
+          FUNKEY_IROH_STATE_DIR="$host_state/state" \
+          FUNKEY_IROH_INBOX="$host_state/inbox" \
+          FUNKEY_IROH_BUNDLE_INBOX="$host_state/bundles" \
+          FUNKEY_IROH_LIBRARY="$host_state/library" \
+          FUNKEY_IROH_ONLINE_TIMEOUT=2 \
+            "$native" serve --allow-unpaired \
+            >"$host_state/ticket" 2>"$host_state/server.log" &
+          host_pid=$!
+          trap 'kill "$host_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 100); do
+            test -s "$host_state/ticket" && break
+            kill -0 "$host_pid"
+            sleep 0.1
+          done
+          test -s "$host_state/ticket"
+          IFS= read -r host_ticket < "$host_state/ticket"
+
+          ssh_device "funkey-iroh-service enable"
+          device_ticket=$(ssh_device "funkey-iroh-service ticket" | tail -n 1)
+          ssh_device "funkey-iroh peer add hil-host '$host_ticket'"
+
+          FUNKEY_IROH_STATE_DIR="$host_state/client-state" \
+          FUNKEY_IROH_INBOX="$host_state/client-inbox" \
+          FUNKEY_IROH_BUNDLE_INBOX="$host_state/client-bundles" \
+          FUNKEY_IROH_LIBRARY="$host_state/client-library" \
+          FUNKEY_IROH_ONLINE_TIMEOUT=2 \
+            "$native" bundle send "$device_ticket" "$host_bundle" \
+            >"$LOG_DIR/$LOG_PREFIX-host-to-device.log" 2>&1
+
+          ssh_device "test -f /mnt/.funkey-iroh/bundle-inbox/hil-host/hil-host.funkey/content/HIL.gbc &&
+            test -f /mnt/.funkey-iroh/bundle-inbox/hil-host/hil-host.funkey/retroarch/saves/HIL.srm &&
+            test -f /mnt/.funkey-iroh/bundle-inbox/hil-host/hil-host.funkey/retroarch/states/HIL.state0"
+
+          FUNKEY_IROH_STATE_DIR="$host_state/client-state" \
+          FUNKEY_IROH_INBOX="$host_state/client-inbox" \
+          FUNKEY_IROH_BUNDLE_INBOX="$host_state/client-bundles" \
+          FUNKEY_IROH_LIBRARY="$host_state/client-library" \
+          FUNKEY_IROH_ONLINE_TIMEOUT=2 \
+            "$native" bundle send "$device_ticket" "$host_bundle" \
+            >"$LOG_DIR/$LOG_PREFIX-duplicate.log" 2>&1
+          grep -q 'already present' "$LOG_DIR/$LOG_PREFIX-duplicate.log"
+
+          ssh_device "mkdir -p '/mnt/FunKey/HIL' '/mnt/FunKey/.picoarch/data/gambatte' &&
+            printf 'device-game\n' > '/mnt/FunKey/HIL/Device Test.gbc' &&
+            printf 'device-save\n' > '/mnt/FunKey/.picoarch/data/gambatte/Device Test.srm' &&
+            printf 'device-state\n' > '/mnt/FunKey/.picoarch/data/gambatte/Device Test.st0'"
+          device_bundle=$(ssh_device \
+            "funkey-iroh-library adopt gbc gambatte '/mnt/FunKey/HIL/Device Test.gbc'" |
+            tail -n 1)
+          ssh_device "funkey-iroh-library send '$device_bundle' hil-host" \
+            >"$LOG_DIR/$LOG_PREFIX-device-to-host.log" 2>&1
+
+          find "$host_state/bundles" -type f \
+            -path '*Device_Test.funkey/content/Device Test.gbc' -print -quit |
+            grep -q .
+          find "$host_state/bundles" -type f \
+            -path '*Device_Test.funkey/retroarch/saves/Device Test.srm' -print -quit |
+            grep -q .
+          find "$host_state/bundles" -type f \
+            -path '*Device_Test.funkey/retroarch/states/Device Test.state0' -print -quit |
+            grep -q .
+
+          printf 'host-save-conflict\n' \
+            > "$host_bundle/retroarch/saves/HIL.srm"
+          FUNKEY_IROH_STATE_DIR="$host_state/client-state" \
+          FUNKEY_IROH_INBOX="$host_state/client-inbox" \
+          FUNKEY_IROH_BUNDLE_INBOX="$host_state/client-bundles" \
+          FUNKEY_IROH_LIBRARY="$host_state/client-library" \
+          FUNKEY_IROH_ONLINE_TIMEOUT=2 \
+            "$native" bundle send "$device_ticket" "$host_bundle" \
+            >"$LOG_DIR/$LOG_PREFIX-conflict.log" 2>&1
+          grep -q 'stored bundle conflict' "$LOG_DIR/$LOG_PREFIX-conflict.log"
+
+          ssh_device "funkey-iroh-ui-action diagnostics" \
+            >"$LOG_DIR/$LOG_PREFIX-device-diagnostics.log" 2>&1
+          ssh_device "funkey-debug collect iroh-hil" >/dev/null
+
+          kill "$host_pid"
+          wait "$host_pid" || true
+          trap - EXIT
+
+      - name: Record exact hardware evidence identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="${{ steps.firmware.outputs.metadata }}"
+          cp "$metadata" "$LOG_DIR/$LOG_PREFIX-build-metadata.json"
+          source_commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$metadata")
+          source_tree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_tree"])' "$metadata")
+          cat > "$LOG_DIR/HIL-EVIDENCE.env" <<EOF
+          schema=1
+          repository=$GITHUB_REPOSITORY
+          hardware_run_id=$GITHUB_RUN_ID
+          build_run_id=${{ inputs.build_run_id }}
+          source_commit=$source_commit
+          source_tree=$source_tree
+          firmware_sha256=${{ steps.firmware.outputs.firmware_sha }}
+          firmware_file=$(basename "${{ steps.firmware.outputs.firmware }}")
+          ui_self_test=passed
+          library_self_test=passed
+          sftp_roundtrip=passed
+          bundle_host_to_device=passed
+          bundle_device_to_host=passed
+          bundle_duplicate_skip=passed
+          bundle_conflict_preservation=passed
+          savestate_roundtrip=passed
+          EOF
+
+      - name: Collect final debug history
+        if: always()
+        shell: bash
+        run: |
+          ./scripts/funkey-usb-debug logs \
+            "$LOG_DIR/$LOG_PREFIX-final.log" || true
+          ./scripts/funkey-usb-debug history \
+            "$LOG_DIR/$LOG_PREFIX-history.log" || true
+
+      - name: Upload hardware evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FunKey Iroh hardware evidence
+          if-no-files-found: warn
+          path: hardware-logs/

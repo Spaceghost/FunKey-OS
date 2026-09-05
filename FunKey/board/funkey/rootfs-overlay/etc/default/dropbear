@@ -1,3 +1,7 @@
 #!/bin/sh
 
-#DROPBEAR_ARGS="-b /etc/issue.net"
+# Authentication and reachability are both fail-closed: public keys only,
+# bound to the device side of the point-to-point USB network.
+DROPBEAR_ARGS="-s -g"
+DROPBEAR_BIND_ADDRESS=192.168.137.2
+DROPBEAR_PORT=22

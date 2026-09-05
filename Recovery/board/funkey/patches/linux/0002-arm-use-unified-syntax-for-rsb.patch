@@ -1,0 +1,18 @@
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Subject: [PATCH] ARM: use unified syntax for conditional flag-setting rsb
+
+Place the flag-setting suffix before the condition code for LLVM's unified
+assembler syntax.
+
+---
+ arch/arm/include/asm/spinlock.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm/include/asm/spinlock.h b/arch/arm/include/asm/spinlock.h
+--- a/arch/arm/include/asm/spinlock.h
++++ b/arch/arm/include/asm/spinlock.h
+@@ -222,1 +222,1 @@
+-"	rsbpls	%0, %1, #0\n"
++"	rsbspl	%0, %1, #0\n"
+-- 
+2.30.2

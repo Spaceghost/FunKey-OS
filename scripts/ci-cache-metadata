@@ -1,0 +1,125 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo"
+
+hash_stream() {
+	sha256sum | awk '{print $1}'
+}
+
+git_object() {
+	path=$1
+	if git cat-file -e "HEAD:$path" 2>/dev/null; then
+		printf '%s=%s\n' "$path" "$(git rev-parse "HEAD:$path")"
+	else
+		printf '%s=missing\n' "$path"
+	fi
+}
+
+first_line() {
+	"$@" 2>&1 | sed -n '1p'
+}
+
+image_material() {
+	printf 'ci-image-digest=%s\n' "${FUNKEY_CI_IMAGE_DIGEST:-unversioned}"
+	printf 'ci-image-revision=%s\n' "${FUNKEY_CI_IMAGE_REVISION:-unversioned}"
+	git_object docker/focal-ci/Dockerfile
+}
+
+host_material() {
+	printf '%s\n' 'schema=funkey-build-state-v3'
+	if [ -r /etc/os-release ]; then
+		(
+			. /etc/os-release
+			printf 'os=%s:%s\n' "${ID:-unknown}" "${VERSION_ID:-unknown}"
+		)
+	else
+		printf '%s\n' 'os=unknown'
+	fi
+	printf 'workspace=%s\n' "$(pwd -P)"
+	printf 'machine=%s\n' "$(uname -m)"
+	printf 'libc=%s\n' "$(first_line ldd --version)"
+	printf 'gcc=%s\n' "$(gcc -dumpfullversion -dumpversion 2>/dev/null || gcc -dumpversion)"
+	printf 'python=%s\n' "$(first_line python3 --version)"
+	printf 'zig=%s\n' "$(zig version 2>/dev/null || printf '%s' missing)"
+	image_material
+	git_object buildroot
+	git_object Makefile
+	git_object patches/buildroot
+	git_object scripts/ci-cache-metadata
+	git_object scripts/install-zig-cc
+	git_object scripts/install-zig-host-tools
+	git_object scripts/prepare-buildroot
+	git_object scripts/zig-as-wrapper
+	git_object scripts/zig-cc-wrapper
+	git_object scripts/zig-host-compiler
+}
+
+ccache_material() {
+	printf '%s\n' 'schema=funkey-ccache-v3'
+	if [ -r /etc/os-release ]; then
+		(
+			. /etc/os-release
+			printf 'os=%s:%s\n' "${ID:-unknown}" "${VERSION_ID:-unknown}"
+		)
+	else
+		printf '%s\n' 'os=unknown'
+	fi
+	printf 'workspace=%s\n' "$(pwd -P)"
+	printf 'machine=%s\n' "$(uname -m)"
+	printf 'libc=%s\n' "$(first_line ldd --version)"
+	printf 'gcc=%s\n' "$(gcc -dumpfullversion -dumpversion 2>/dev/null || gcc -dumpversion)"
+	printf 'zig=%s\n' "$(zig version 2>/dev/null || printf '%s' missing)"
+	image_material
+	git_object buildroot
+	git_object patches/buildroot
+	git_object scripts/ci-cache-metadata
+	git_object scripts/install-zig-cc
+	git_object scripts/install-zig-host-tools
+	git_object scripts/zig-as-wrapper
+	git_object scripts/zig-cc-wrapper
+	git_object scripts/zig-host-compiler
+	for config in FunKey/configs/funkey_defconfig Recovery/configs/recovery_defconfig; do
+		printf 'config=%s\n' "$config"
+		sed -n \
+			'/^BR2_arm=/p;
+			 /^BR2_cortex_/p;
+			 /^BR2_ARM_/p;
+			 /^BR2_CCACHE/p;
+			 /^BR2_OPTIMIZE_/p;
+			 /^BR2_REPRODUCIBLE/p;
+			 /^BR2_SHARED_STATIC_LIBS/p;
+			 /^BR2_TOOLCHAIN_/p;
+			 /^BR2_TARGET_OPTIMIZATION/p' \
+			"$config"
+	done
+}
+
+scope_raw=${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-local}}
+scope=$(printf '%s' "$scope_raw" |
+	tr -c 'A-Za-z0-9._-' '-' |
+	sed 's/^-*//; s/-*$//; s/--*/-/g' |
+	cut -c1-80)
+[ -n "$scope" ] || scope=local
+
+common=$(host_material | hash_stream)
+ccache=$(ccache_material | hash_stream)
+funkey=$(
+	{
+		host_material
+		git_object FunKey
+	} | hash_stream
+)
+recovery=$(
+	{
+		host_material
+		git_object Recovery
+	} | hash_stream
+)
+
+printf 'scope=%s\n' "$scope"
+printf 'common=%s\n' "$common"
+printf 'ccache=%s\n' "$ccache"
+printf 'funkey=%s\n' "$funkey"
+printf 'recovery=%s\n' "$recovery"

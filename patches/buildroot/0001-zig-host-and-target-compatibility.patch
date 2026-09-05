@@ -1,0 +1,60 @@
+diff --git a/package/fbv/fbv.mk b/package/fbv/fbv.mk
+index a69e4ad..b99bec4 100644
+--- a/package/fbv/fbv.mk
++++ b/package/fbv/fbv.mk
+@@ -13,12 +13,14 @@ FBV_LICENSE_FILES = COPYING
+ ### image format dependencies and configure options
+ FBV_DEPENDENCIES = # empty
+ FBV_CONFIGURE_OPTS = # empty
++FBV_LIBS =
+ ifeq ($(BR2_PACKAGE_FBV_PNG),y)
+ FBV_DEPENDENCIES += libpng
++FBV_LIBS += -lpng -lz
+ 
+ # libpng in turn depends on other libraries
+ ifeq ($(BR2_STATIC_LIBS),y)
+-FBV_CONFIGURE_OPTS += "--libs=`$(PKG_CONFIG_HOST_BINARY) --libs libpng`"
++FBV_LIBS := `$(PKG_CONFIG_HOST_BINARY) --libs libpng`
+ endif
+ 
+ else
+@@ -26,15 +28,19 @@ FBV_CONFIGURE_OPTS += --without-libpng
+ endif
+ ifeq ($(BR2_PACKAGE_FBV_JPEG),y)
+ FBV_DEPENDENCIES += jpeg
++FBV_LIBS += -ljpeg
+ else
+ FBV_CONFIGURE_OPTS += --without-libjpeg
+ endif
+ ifeq ($(BR2_PACKAGE_FBV_GIF),y)
+ FBV_DEPENDENCIES += giflib
++FBV_LIBS += -lgif
+ else
+ FBV_CONFIGURE_OPTS += --without-libungif
+ endif
+ 
++FBV_CONFIGURE_OPTS += --libs="$(FBV_LIBS)"
++
+ #fbv doesn't support cross-compilation
+ define FBV_CONFIGURE_CMDS
+ 	(cd $(FBV_DIR); rm -f config.cache; \
+diff --git a/package/python/python.mk b/package/python/python.mk
+index 10718f4..9324592 100644
+--- a/package/python/python.mk
++++ b/package/python/python.mk
+@@ -42,9 +42,15 @@ HOST_PYTHON_CONF_OPTS += \
+ # try to communicate over the network during the build.
+ HOST_PYTHON_CONF_ENV += \
+ 	LDFLAGS="$(HOST_LDFLAGS) -Wl,--enable-new-dtags" \
++	DISABLED_EXTENSIONS="crypt" \
+ 	ac_cv_prog_HAS_HG=/bin/false \
+ 	ac_cv_prog_SVNVERSION=/bin/false
+ 
++# Python 2's optional host-side crypt module assumes crypt(3) is provided by
++# libc. Modern hosts provide it through libxcrypt, and no Buildroot host tool
++# needs this extension. Disable only this build-host module through Python's
++# configure-generated extension list.
++
+ # Building host python in parallel sometimes triggers a "Bus error"
+ # during the execution of "./python setup.py build" in the
+ # installation step. It is probably due to the installation of a

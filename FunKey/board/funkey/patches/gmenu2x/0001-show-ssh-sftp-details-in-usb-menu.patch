@@ -1,0 +1,86 @@
+From d14e274b1b684b4566c1cb87d20d89e93fdf466c Mon Sep 17 00:00:00 2001
+From: Spaceghost <spaceghost@users.noreply.github.com>
+Date: Sun, 31 Aug 2026 01:00:00 -0700
+Subject: [PATCH] Show SSH and SFTP details in the USB menu
+
+The USB menu is already only reachable when a data host has configured the
+gadget.  When the RNDIS function is present, use the otherwise empty lower
+half of that pane to show the connection and public-key provisioning details.
+
+Keep the mount/eject title and confirmation flow intact.  The connection
+details disappear while an action or confirmation is on screen so they do
+not overlap existing status text.
+---
+ src/funkeymenu.cpp | 30 ++++++++++++++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/src/funkeymenu.cpp b/src/funkeymenu.cpp
+index 388b8ce..58969e9 100644
+--- a/src/funkeymenu.cpp
++++ b/src/funkeymenu.cpp
+@@ -1,5 +1,6 @@
+ #include "funkeymenu.h"
+ #include <iostream>
++#include <unistd.h>
+ 
+ /// -------------- DEFINES --------------
+ #define MIN(a,b) (((a)<(b))?(a):(b))
+@@ -95,6 +96,7 @@ int FunkeyMenu::savestate_slot = 0;
+ /// USB stuff
+ int usb_data_connected = 0;
+ int usb_sharing = 0;
++int usb_network_enabled = 0;
+ 
+ 
+ /// -------------- FUNCTIONS IMPLEMENTATION --------------
+@@ -449,6 +451,7 @@ void FunkeyMenu::init_menu_system_values(){
+ 	/// ------- Get USB Value -------
+ 	usb_data_connected = executeRawPath(SHELL_CMD_SHARE_IS_USB_DATA_CONNECTED);
+ 	usb_sharing = executeRawPath(SHELL_CMD_SHARE_IS_SHARING);
++	usb_network_enabled = access("/sys/class/net/usb0", F_OK) == 0;
+ 
+ 	/** Sanity check if usb not connected */
+ 	if(!usb_data_connected){
+@@ -596,7 +599,9 @@ void FunkeyMenu::menu_screen_refresh(int menuItem, int prevItem, int scroll, uint
+ 			sprintf(text_tmp, "%s USB", usb_sharing?"EJECT":"MOUNT");
+ 			text_surface = TTF_RenderText_Blended(menu_title_font, text_tmp, text_color);
+ 			text_pos.x = (draw_screen->w - MENU_ZONE_WIDTH)/2 + (MENU_ZONE_WIDTH - text_surface->w)/2;
+-			text_pos.y = draw_screen->h - MENU_ZONE_HEIGHT/2 - text_surface->h/2;
++			text_pos.y = draw_screen->h - MENU_ZONE_HEIGHT/2 - text_surface->h/2
++				- ((usb_network_enabled && !menu_action && !menu_confirmation)
++					? padding_y_from_center_menu_zone : 0);
+ 			SDL_BlitSurface(text_surface, NULL, draw_screen, &text_pos);
+ 
+ 			if(menu_action){
+@@ -614,7 +619,28 @@ void FunkeyMenu::menu_screen_refresh(int menuItem, int prevItem, int scroll, uint
+ 				SDL_BlitSurface(text_surface, NULL, draw_screen, &text_pos);
+ 			}
+ 			else{
+-					///Nothing
++				static const char *usb_network_info[] = {
++					"SSH / SFTP",
++					"root@192.168.137.2",
++					"key: /authorized_keys"
++				};
++
++				if(usb_network_enabled && !menu_action && !menu_confirmation){
++					for(int line = 0; line < 3; line++){
++						SDL_Surface *usb_text_surface = TTF_RenderText_Blended(
++							menu_small_info_font, usb_network_info[line], text_color);
++						if(!usb_text_surface){
++							continue;
++						}
++						text_pos.x = (draw_screen->w - MENU_ZONE_WIDTH)/2
++							+ (MENU_ZONE_WIDTH - usb_text_surface->w)/2;
++						text_pos.y = draw_screen->h - MENU_ZONE_HEIGHT/2
++							- usb_text_surface->h/2
++							+ (line + 1)*padding_y_from_center_menu_zone;
++						SDL_BlitSurface(usb_text_surface, NULL, draw_screen, &text_pos);
++						SDL_FreeSurface(usb_text_surface);
++					}
++				}
+ 			}
+ 			break;
+ 
+-- 
+2.51.0

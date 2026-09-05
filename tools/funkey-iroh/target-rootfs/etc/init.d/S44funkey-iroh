@@ -1,0 +1,179 @@
+#!/bin/sh
+
+DAEMON=${FUNKEY_IROH_BIN:-/usr/bin/funkey-iroh}
+PIDFILE=/var/run/funkey-iroh.pid
+CONFIG=/etc/default/funkey-iroh
+
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+FUNKEY_IROH_STATE_DIR=${FUNKEY_IROH_STATE_DIR:-/mnt/.funkey-iroh}
+FUNKEY_IROH_INBOX=${FUNKEY_IROH_INBOX:-$FUNKEY_IROH_STATE_DIR/inbox}
+FUNKEY_IROH_BUNDLE_INBOX=${FUNKEY_IROH_BUNDLE_INBOX:-$FUNKEY_IROH_STATE_DIR/bundle-inbox}
+FUNKEY_IROH_LIBRARY=${FUNKEY_IROH_LIBRARY:-/mnt/FunKey/Shared Games}
+FUNKEY_IROH_MAX_SAVE_BYTES=${FUNKEY_IROH_MAX_SAVE_BYTES:-67108864}
+FUNKEY_IROH_MAX_BUNDLE_BYTES=${FUNKEY_IROH_MAX_BUNDLE_BYTES:-17179869184}
+FUNKEY_IROH_MAX_BUNDLE_FILES=${FUNKEY_IROH_MAX_BUNDLE_FILES:-4096}
+FUNKEY_IROH_MAX_INCOMING_CONNECTIONS=${FUNKEY_IROH_MAX_INCOMING_CONNECTIONS:-4}
+FUNKEY_IROH_HANDSHAKE_TIMEOUT=${FUNKEY_IROH_HANDSHAKE_TIMEOUT:-15}
+FUNKEY_IROH_ONLINE_TIMEOUT=${FUNKEY_IROH_ONLINE_TIMEOUT:-8}
+FUNKEY_IROH_LOG_MAX_BYTES=${FUNKEY_IROH_LOG_MAX_BYTES:-1048576}
+FUNKEY_IROH_SERVICE_ARGS=${FUNKEY_IROH_SERVICE_ARGS:-serve}
+FUNKEY_IROH_RUNTIME_DIR=${FUNKEY_IROH_RUNTIME_DIR:-/var/run/funkey-iroh}
+FUNKEY_IROH_EXCLUSIVE=${FUNKEY_IROH_EXCLUSIVE:-$FUNKEY_IROH_RUNTIME_DIR/exclusive}
+ENABLE_FILE=$FUNKEY_IROH_STATE_DIR/enabled
+TICKET_FILE=$FUNKEY_IROH_STATE_DIR/current-ticket
+LOG_FILE=$FUNKEY_IROH_STATE_DIR/service.log
+UI_OPK_SOURCE=${FUNKEY_IROH_UI_OPK_SOURCE:-/usr/local/share/OPKs/Settings/iroh_funkey-s.opk}
+UI_OPK_TARGET=${FUNKEY_IROH_UI_OPK_TARGET:-/mnt/Settings/iroh_funkey-s.opk}
+
+export FUNKEY_IROH_STATE_DIR
+export FUNKEY_IROH_INBOX
+export FUNKEY_IROH_BUNDLE_INBOX
+export FUNKEY_IROH_LIBRARY
+export FUNKEY_IROH_MAX_SAVE_BYTES
+export FUNKEY_IROH_MAX_BUNDLE_BYTES
+export FUNKEY_IROH_MAX_BUNDLE_FILES
+export FUNKEY_IROH_MAX_INCOMING_CONNECTIONS
+export FUNKEY_IROH_HANDSHAKE_TIMEOUT
+export FUNKEY_IROH_ONLINE_TIMEOUT
+
+is_running()
+{
+    [ -r "$PIDFILE" ] || return 1
+    IFS= read -r pid < "$PIDFILE" || return 1
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+data_is_mounted()
+{
+    grep -q '[[:space:]]/mnt[[:space:]]' /proc/mounts 2>/dev/null
+}
+
+rotate_log()
+{
+    case "$FUNKEY_IROH_LOG_MAX_BYTES" in
+        ''|*[!0-9]*)
+            echo "funkey-iroh: invalid FUNKEY_IROH_LOG_MAX_BYTES=$FUNKEY_IROH_LOG_MAX_BYTES" >&2
+            return 1
+            ;;
+    esac
+    [ "$FUNKEY_IROH_LOG_MAX_BYTES" -gt 0 ] || return 0
+    [ -f "$LOG_FILE" ] || return 0
+    log_size=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]')
+    case "$log_size" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$log_size" -gt "$FUNKEY_IROH_LOG_MAX_BYTES" ]; then
+        rm -f "$LOG_FILE.1"
+        mv "$LOG_FILE" "$LOG_FILE.1"
+    fi
+}
+
+install_one_opk()
+{
+    source=$1
+    target=$2
+    [ -r "$source" ] || return 0
+    mkdir -p "$(dirname "$target")"
+    if [ -r "$target" ] && cmp -s "$source" "$target"; then
+        return 0
+    fi
+    temporary="${target}.tmp.$$"
+    cp "$source" "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    sync "$temporary" 2>/dev/null || sync
+    mv "$temporary" "$target"
+}
+
+install_ui()
+{
+    data_is_mounted || return 0
+    install_one_opk "$UI_OPK_SOURCE" "$UI_OPK_TARGET" || return 1
+    for source in /usr/local/share/OPKs/Libretro/*_picoarch_funkey-s.opk; do
+        [ -r "$source" ] || continue
+        install_one_opk "$source" "/mnt/Libretro/$(basename "$source")" || return 1
+    done
+}
+
+start_service()
+{
+    install_ui || echo "funkey-iroh: could not install launcher UI" >&2
+
+    if [ ! -x "$DAEMON" ]; then
+        echo "funkey-iroh: missing $DAEMON" >&2
+        return 1
+    fi
+    if [ ! -e "$ENABLE_FILE" ]; then
+        echo "funkey-iroh: disabled"
+        return 0
+    fi
+    if ! data_is_mounted; then
+        echo "funkey-iroh: /mnt is not mounted" >&2
+        return 1
+    fi
+    if [ -e "$FUNKEY_IROH_EXCLUSIVE" ]; then
+        echo "funkey-iroh: endpoint reserved by foreground command"
+        return 0
+    fi
+    if is_running; then
+        echo "funkey-iroh: already running ($pid)"
+        return 0
+    fi
+
+    mkdir -p \
+        "$FUNKEY_IROH_STATE_DIR" \
+        "$FUNKEY_IROH_INBOX" \
+        "$FUNKEY_IROH_BUNDLE_INBOX" \
+        "$FUNKEY_IROH_LIBRARY" \
+        "$FUNKEY_IROH_RUNTIME_DIR"
+    rotate_log || return $?
+    touch "$LOG_FILE"
+    rm -f "$PIDFILE" "$TICKET_FILE"
+    echo "funkey-iroh: starting"
+    # FUNKEY_IROH_SERVICE_ARGS is an administrator-owned shell word list.
+    # shellcheck disable=SC2086
+    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" \
+        -- $FUNKEY_IROH_SERVICE_ARGS >>"$LOG_FILE" 2>&1
+}
+
+stop_service()
+{
+    if is_running; then
+        echo "funkey-iroh: stopping ($pid)"
+        start-stop-daemon -K -q -p "$PIDFILE" -o || return 1
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1:-}" in
+    start)
+        start_service
+        ;;
+    stop)
+        stop_service
+        ;;
+    restart)
+        stop_service
+        start_service
+        ;;
+    status)
+        if is_running; then
+            echo "funkey-iroh: running ($pid)"
+            exit 0
+        fi
+        echo "funkey-iroh: stopped"
+        exit 1
+        ;;
+    install-ui)
+        install_ui
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|install-ui}" >&2
+        exit 64
+        ;;
+esac

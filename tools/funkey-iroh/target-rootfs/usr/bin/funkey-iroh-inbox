@@ -1,0 +1,242 @@
+#!/bin/sh
+set -u
+
+COMMON=${FUNKEY_IROH_COMMON:-/usr/lib/funkey-iroh/common.sh}
+[ -r "$COMMON" ] || {
+    echo "missing $COMMON" >&2
+    exit 1
+}
+. "$COMMON"
+
+AUTO_FILE=${FUNKEY_IROH_AUTO_FILE:-$FUNKEY_IROH_STATE_DIR/auto-apply}
+
+split_inbox_path()
+{
+    source=$1
+    canonical=$(iroh_path_under "$source" "$FUNKEY_IROH_INBOX") || return 1
+    relative=${canonical#"$FUNKEY_IROH_INBOX"/}
+    peer=${relative%%/*}
+    rest=${relative#*/}
+    [ "$rest" != "$relative" ] || return 1
+    system=${rest%%/*}
+    rest=${rest#*/}
+    game=${rest%%/*}
+    filename=${rest#*/}
+    case "$peer:$system:$game:$filename" in
+        *:|*/*:*) return 1 ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$canonical" "$peer" "$system" "$game" "$filename"
+}
+
+registry_file()
+{
+    system=$(iroh_sanitize "$1")
+    game=$(iroh_sanitize "$2")
+    printf '%s/%s/%s/targets\n' "$FUNKEY_IROH_GAME_DB" "$system" "$game"
+}
+
+find_target()
+{
+    system=$1
+    game=$2
+    filename=$3
+    registry=$(registry_file "$system" "$game")
+    [ -r "$registry" ] || return 1
+
+    exact=
+    extension=${filename##*.}
+    [ "$extension" != "$filename" ] || extension=
+    fallback=
+
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        iroh_safe_path "$candidate" || continue
+        [ "${candidate#"$FUNKEY_IROH_STATE_DIR"/}" = "$candidate" ] || continue
+        [ "${candidate#"$FUNKEY_IROH_INBOX"/}" = "$candidate" ] || continue
+        base=$(basename "$candidate")
+        if [ "$base" = "$filename" ]; then
+            exact=$candidate
+            break
+        fi
+        candidate_extension=${base##*.}
+        if [ -n "$extension" ] && [ "$candidate_extension" = "$extension" ] && [ -z "$fallback" ]; then
+            fallback=$candidate
+        elif [ -z "$fallback" ]; then
+            fallback=$candidate
+        fi
+    done < "$registry"
+
+    target=${exact:-$fallback}
+    [ -n "$target" ] || return 1
+    printf '%s\n' "$target"
+}
+
+list_inbox()
+{
+    iroh_ensure_state
+    find "$FUNKEY_IROH_INBOX" -type f 2>/dev/null |
+        sort |
+    while IFS= read -r source; do
+        fields=$(split_inbox_path "$source") || continue
+        IFS='	' read -r canonical peer system game filename <<EOF
+$fields
+EOF
+        size=$(wc -c < "$canonical" | tr -d ' ')
+        if target=$(find_target "$system" "$game" "$filename" 2>/dev/null); then
+            target_state=$target
+        else
+            target_state=-
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$canonical" "$peer" "$system" "$game" "$filename" "$size" "$target_state"
+    done
+}
+
+archive_source()
+{
+    canonical=$1
+    peer=$2
+    system=$3
+    game=$4
+    filename=$5
+    destination_dir="$FUNKEY_IROH_ARCHIVE/$peer/$system/$game"
+    mkdir -p "$destination_dir"
+    destination="$destination_dir/$filename"
+    if [ -e "$destination" ]; then
+        stamp=$(date +%s 2>/dev/null || echo 0)
+        destination="$destination_dir/${filename}.received-$stamp-$$"
+    fi
+    mv "$canonical" "$destination" || return 1
+    printf '%s\n' "$destination"
+}
+
+install_source()
+{
+    source=$1
+    mode=${2:-manual}
+    fields=$(split_inbox_path "$source") || iroh_die 64 "path is not a received save"
+    IFS='	' read -r canonical peer system game filename <<EOF
+$fields
+EOF
+
+    target=$(find_target "$system" "$game" "$filename" 2>/dev/null) || {
+        [ "$mode" = auto ] && return 3
+        iroh_die 3 "no local save target is registered for $system/$game"
+    }
+    iroh_safe_path "$target" || iroh_die 1 "registered target is unsafe: $target"
+
+    incoming_hash=$(iroh_hash_file "$canonical") || iroh_die 1 "cannot hash incoming save"
+    current_hash=
+    if [ -e "$target" ]; then
+        current_hash=$(iroh_hash_file "$target") || iroh_die 1 "cannot hash current save"
+    fi
+
+    if [ "$mode" = auto ] && [ -e "$target" ]; then
+        baseline=$(iroh_read_baseline "$peer" "$system" "$game" "$filename")
+        if [ -z "$baseline" ] || [ "$current_hash" != "$baseline" ]; then
+            return 4
+        fi
+    fi
+
+    if [ -n "$current_hash" ] && [ "$current_hash" = "$incoming_hash" ]; then
+        archive=$(archive_source "$canonical" "$peer" "$system" "$game" "$filename") ||
+            iroh_die 1 "cannot archive duplicate incoming save"
+        iroh_write_baseline "$peer" "$system" "$game" "$target" "$incoming_hash" || :
+        printf 'DUPLICATE\t%s\t%s\n' "$target" "$archive"
+        return 0
+    fi
+
+    if [ -e "$target" ]; then
+        stamp=$(date +%s 2>/dev/null || echo 0)
+        backup_dir="$FUNKEY_IROH_BACKUPS/$stamp/$system/$game"
+        mkdir -p "$backup_dir"
+        backup="$backup_dir/$(basename "$target")"
+        cp "$target" "$backup" ||
+            iroh_die 1 "cannot back up current save to $backup"
+        sync "$backup" 2>/dev/null || sync
+    else
+        backup=-
+    fi
+
+    mkdir -p "$(dirname "$target")"
+    temporary="${target}.iroh.tmp.$$"
+    cp "$canonical" "$temporary" || {
+        rm -f "$temporary"
+        iroh_die 1 "cannot stage incoming save beside $target"
+    }
+    sync "$temporary" 2>/dev/null || sync
+    mv "$temporary" "$target" || {
+        rm -f "$temporary"
+        iroh_die 1 "cannot install incoming save"
+    }
+    sync "$target" 2>/dev/null || sync
+
+    archive=$(archive_source "$canonical" "$peer" "$system" "$game" "$filename") ||
+        iroh_die 1 "save was installed but incoming archive failed"
+    iroh_write_baseline "$peer" "$system" "$game" "$target" "$incoming_hash" || :
+
+    printf 'INSTALLED\t%s\t%s\t%s\n' "$target" "$backup" "$archive"
+}
+
+archive_command()
+{
+    fields=$(split_inbox_path "$1") || iroh_die 64 "path is not a received save"
+    IFS='	' read -r canonical peer system game filename <<EOF
+$fields
+EOF
+    destination=$(archive_source "$canonical" "$peer" "$system" "$game" "$filename") ||
+        iroh_die 1 "cannot archive incoming save"
+    printf 'ARCHIVED\t%s\n' "$destination"
+}
+
+auto_apply()
+{
+    [ -e "$AUTO_FILE" ] || return 0
+    [ -r "$FUNKEY_IROH_SYNC_PEERS" ] || return 0
+
+    list_inbox |
+    while IFS='	' read -r source peer system game filename size target; do
+        iroh_line_present "$peer" "$FUNKEY_IROH_SYNC_PEERS" || continue
+        [ "$target" != - ] || continue
+        install_source "$source" auto >/dev/null 2>&1 || :
+    done
+}
+
+case "${1:-}" in
+    list)
+        list_inbox
+        ;;
+    target)
+        shift
+        fields=$(split_inbox_path "${1:-}") || iroh_die 64 "path is not a received save"
+        IFS='	' read -r canonical peer system game filename <<EOF
+$fields
+EOF
+        find_target "$system" "$game" "$filename"
+        ;;
+    install)
+        shift
+        install_source "${1:-}" manual
+        ;;
+    archive)
+        shift
+        archive_command "${1:-}"
+        ;;
+    auto)
+        auto_apply
+        ;;
+    *)
+        cat >&2 <<EOF
+Usage: $(basename "$0") COMMAND [PATH]
+
+Commands:
+  list          List received saves and their safe installation targets
+  target PATH   Print the registered local target for one received save
+  install PATH  Back up the local save, install the received copy, then archive it
+  archive PATH  Keep the incoming copy without changing the live save
+  auto          Apply only saves whose local target still matches its peer baseline
+EOF
+        exit 64
+        ;;
+esac

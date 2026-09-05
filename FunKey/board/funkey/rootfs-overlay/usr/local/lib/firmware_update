@@ -1,0 +1,73 @@
+#!/bin/sh
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+
+if ! command -v usb_debug_log >/dev/null 2>&1; then
+    usb_debug_log() { :; }
+fi
+if ! command -v usb_debug_run >/dev/null 2>&1; then
+    usb_debug_run()
+    {
+        shift
+        "$@"
+    }
+fi
+if ! command -v usb_debug_set_update_state >/dev/null 2>&1; then
+    usb_debug_set_update_state() { :; }
+fi
+
+# Select a firmware update without splitting filenames or guessing which of
+# several updates the user intended to install.
+find_firmware_update()
+{
+    FIRMWARE_UPDATE_FILE=
+    firmware_update_directory=${1:-/mnt}
+
+    set -- "$firmware_update_directory"/FunKey-*.fwu
+    if [ "$#" -eq 1 ] && [ ! -f "$1" ]; then
+        usb_debug_log firmware-selection "directory=$firmware_update_directory result=none"
+        return 1
+    fi
+    if [ "$#" -ne 1 ]; then
+        usb_debug_log firmware-selection "directory=$firmware_update_directory result=ambiguous count=$#"
+        return 2
+    fi
+
+    FIRMWARE_UPDATE_FILE=$1
+    usb_debug_log firmware-selection "result=selected file=$FIRMWARE_UPDATE_FILE"
+    return 0
+}
+
+# Validate the complete archive before allowing SWUpdate to stream anything to
+# the root partition. The normal install pass repeats these checks while it
+# writes, but discovering a damaged archive there would be too late.
+validate_firmware_update()
+{
+    usb_debug_set_update_state validating
+    usb_debug_run swupdate-preflight swupdate -c -i "$1"
+    firmware_validation_status=$?
+    if [ "$firmware_validation_status" -eq 0 ]; then
+        usb_debug_set_update_state validated
+    else
+        usb_debug_set_update_state validation-failed
+    fi
+    return "$firmware_validation_status"
+}
+
+install_firmware_update()
+{
+    validate_firmware_update "$1" || return 1
+
+    usb_debug_set_update_state installing
+    usb_debug_run swupdate-install swupdate -i "$1"
+    firmware_install_status=$?
+    if [ "$firmware_install_status" -eq 0 ]; then
+        usb_debug_set_update_state flash-complete
+    else
+        usb_debug_set_update_state flash-failed
+    fi
+    return "$firmware_install_status"
+}

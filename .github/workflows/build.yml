@@ -2,35 +2,248 @@ name: FunKey-OS Build
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/pull_request_template.md"
+      - ".github/workflows/build-focal-image.yml"
+      - "docker/focal-ci/**"
   pull_request:
-    branches: [ master ]
+    branches: [master, rg-nano-next]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/pull_request_template.md"
+      - ".github/workflows/build-focal-image.yml"
+      - "docker/focal-ci/**"
   workflow_dispatch:
-    branches: [ master ]
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: funkey-os-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
 
-    runs-on: ubuntu-20.04
+    # This digest contains the exact Focal packages and Zig release required by
+    # the old Buildroot tree. Package installation belongs in the image build,
+    # not in every firmware run like some recurring administrative punishment.
+    container:
+      image: ghcr.io/spaceghost/funkey-os-build@sha256:7abb83f775219b39a777ae9950ce1f2151587e999e46fdcfecfce8ba316cd2d4
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      FORCE_UNSAFE_CONFIGURE: "1"
+      FUNKEY_CI_IMAGE_DIGEST: sha256:7abb83f775219b39a777ae9950ce1f2151587e999e46fdcfecfce8ba316cd2d4
+      # Buildroot explicitly permits these environment overrides. Keeping the
+      # caches outside output/ lets a full state invalidation retain downloads
+      # and compiler objects.
+      BR2_DL_DIR: ${{ github.workspace }}/download
+      BR2_CCACHE_DIR: ${{ github.workspace }}/.buildroot-ccache
+      CCACHE_DIR: ${{ github.workspace }}/.buildroot-ccache
+      SEGMENT_DOWNLOAD_TIMEOUT_MINS: "15"
 
     steps:
-    - uses: actions/checkout@v2
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y -q --no-install-recommends make binutils build-essential gcc g++ patch bzip2 perl cpio unzip rsync file bc wget python python-dev xxd libncurses5-dev cvs git mercurial rsync liblscp-dev subversion python3 python3-dev python3-distutils python3-setuptools ca-certificates openssh-client expect locales sudo procps
-        sudo apt-get -y autoremove
-        sudo apt-get -y clean
-        sudo rm -rf /var/lib/apt/lists/*
-        sudo sed -i 's/# \(en_US.UTF-8\)/\1/' /etc/locale.gen
-        sudo locale-gen --purge --lang en_US.UTF-8
-    - name: Build SDK
-      run: make sdk
-    - name: Build FunKey-OS
-      run: make
-    - uses: actions/upload-artifact@v2
-      with:
-        name: Upload artifacts
-        path: |
-          images/*
-          br.log
+      - name: Check out firmware sources
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          submodules: recursive
+
+      - name: Trust the container-mounted checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Verify the pinned build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(zig version)" = "0.16.0"
+          test "$(python --version 2>&1)" = "Python 3.8.10"
+          test "${FUNKEY_CI_IMAGE_REVISION:-}" = "ee1032e57e2e97168e78a4b622c45a34261411fb"
+          printf 'image digest:   %s\n' "$FUNKEY_CI_IMAGE_DIGEST"
+          printf 'image revision: %s\n' "$FUNKEY_CI_IMAGE_REVISION"
+          git --version
+          gcc --version | sed -n '1p'
+
+      - name: Validate USB update and debug tooling
+        run: |
+          ./scripts/test-firmware-update
+          ./scripts/test-usb-network-hotplug
+          ./scripts/test-usb-menu-info
+          ./scripts/test-usb-debug
+
+      - name: Compute safe cache fingerprints
+        id: cache-meta
+        run: ./scripts/ci-cache-metadata >> "$GITHUB_OUTPUT"
+
+      - name: Prepare cache directories
+        run: mkdir -p download "$BR2_CCACHE_DIR" FunKey/output Recovery/output
+
+      - name: Restore Buildroot downloads
+        id: cache-downloads
+        uses: actions/cache/restore@v5
+        with:
+          path: download
+          key: funkey-downloads-v2-${{ steps.cache-meta.outputs.scope }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            funkey-downloads-v2-${{ steps.cache-meta.outputs.scope }}-
+            funkey-downloads-v2-
+
+      - name: Restore compiler cache
+        id: cache-ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: .buildroot-ccache
+          key: funkey-ccache-v3-${{ steps.cache-meta.outputs.ccache }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            funkey-ccache-v3-${{ steps.cache-meta.outputs.ccache }}-
+
+      # Whole Buildroot output trees are restored only for an exact source,
+      # profile, host, and container digest. They are saved only after success.
+      # Failed runs preserve downloads and atomic ccache entries instead of
+      # reviving arbitrary half-written package state.
+      - name: Restore exact Recovery build state
+        id: cache-recovery
+        uses: actions/cache/restore@v5
+        with:
+          path: Recovery/output
+          key: funkey-recovery-v3-${{ steps.cache-meta.outputs.recovery }}
+
+      - name: Restore exact FunKey build state
+        id: cache-funkey
+        uses: actions/cache/restore@v5
+        with:
+          path: FunKey/output
+          key: funkey-os-v3-${{ steps.cache-meta.outputs.funkey }}
+
+      - name: Report restored build state
+        shell: bash
+        run: |
+          printf 'downloads: %s\n' '${{ steps.cache-downloads.outputs.cache-matched-key }}'
+          printf 'ccache:    %s\n' '${{ steps.cache-ccache.outputs.cache-matched-key }}'
+          printf 'Recovery:  %s\n' '${{ steps.cache-recovery.outputs.cache-matched-key }}'
+          printf 'FunKey:    %s\n' '${{ steps.cache-funkey.outputs.cache-matched-key }}'
+          du -sh download .buildroot-ccache Recovery/output FunKey/output 2>/dev/null || true
+          for tool in FunKey/output/host/bin/ccache Recovery/output/host/bin/ccache; do
+            if [ -x "$tool" ]; then
+              "$tool" --zero-stats || "$tool" -z || true
+              break
+            fi
+          done
+
+      - name: Build production, network-only, and persistent USB-debug profiles with Zig
+        run: |
+          make -j"$(nproc)" zig-all
+          ./scripts/build-usb-variants "$(make -s print-version)"
+
+      - name: Save exact Recovery build state
+        if: >-
+          ${{
+            success() &&
+            steps.cache-recovery.outputs.cache-hit != 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: Recovery/output
+          key: funkey-recovery-v3-${{ steps.cache-meta.outputs.recovery }}
+
+      - name: Save exact FunKey build state
+        if: >-
+          ${{
+            success() &&
+            steps.cache-funkey.outputs.cache-hit != 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: FunKey/output
+          key: funkey-os-v3-${{ steps.cache-meta.outputs.funkey }}
+
+      - name: Report compiler-cache effectiveness
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          for tool in FunKey/output/host/bin/ccache Recovery/output/host/bin/ccache; do
+            if [ -x "$tool" ]; then
+              "$tool" -M 4G || true
+              "$tool" -c || true
+              "$tool" --show-stats || "$tool" -s || true
+              exit 0
+            fi
+          done
+          echo "ccache was not built before the job stopped"
+
+      - name: Select useful rolling caches to persist
+        id: cache-save
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          has_files() {
+            [ -d "$1" ] && [ -n "$(find "$1" -type f -print -quit 2>/dev/null)" ]
+          }
+
+          has_files download && echo 'downloads=true' >> "$GITHUB_OUTPUT"
+          has_files "$BR2_CCACHE_DIR" && echo 'ccache=true' >> "$GITHUB_OUTPUT"
+          :
+
+      - name: Save compiler cache, including successful work from failed builds
+        if: >-
+          ${{
+            !cancelled() &&
+            steps.cache-save.outputs.ccache == 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: .buildroot-ccache
+          key: funkey-ccache-v3-${{ steps.cache-meta.outputs.ccache }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save downloads, including verified files from failed builds
+        if: >-
+          ${{
+            !cancelled() &&
+            steps.cache-save.outputs.downloads == 'true' &&
+            (github.event_name != 'pull_request' ||
+             github.event.pull_request.head.repo.full_name == github.repository)
+          }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: download
+          key: funkey-downloads-v2-${{ steps.cache-meta.outputs.scope }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: FunKey-OS firmware
+          if-no-files-found: warn
+          path: |
+            images/*.fwu
+            images/*.img.xz
+            images/SHA256SUMS-*.txt
+            images/packages-*.json
+            images/packages-*.txt
+            br.log
+            FunKey/output/build/**/config.log
+            Recovery/output/build/**/config.log
+            FunKey/output/build/**/meson-logs/meson-log.txt
+            Recovery/output/build/**/meson-logs/meson-log.txt

@@ -1,0 +1,179 @@
+#!/bin/bash
+# Sourced by build-iroh-variant. This adds the richer launcher lifecycle
+# without replacing the hardened transport, metadata, Recovery, and debug
+# variant builder.
+
+mode=${1:?usage: source augment-iroh-ui-rootfs prepare|verify}
+
+find_iroh_host_tool()
+{
+    local name=$1 candidate
+    for candidate in \
+        "$repo/FunKey/output/host/bin/$name" \
+        "$repo/FunKey/output/host/usr/bin/$name" \
+        "$host_bin/$name"
+    do
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+case "$mode" in
+prepare)
+    unsquashfs_bin=${UNSQUASHFS:-$(find_iroh_host_tool unsquashfs)}
+    [[ -x "$unsquashfs_bin" ]] || {
+        printf 'required host tool is missing: unsquashfs\n' >&2
+        return 127
+    }
+
+    chmod 0755 \
+        "$rootfs_files/etc/init.d/S45funkey-iroh-sync" \
+        "$rootfs_files/usr/bin/funkey-iroh-pairing" \
+        "$rootfs_files/usr/bin/funkey-iroh-sync-peer" \
+        "$rootfs_files/usr/bin/funkey-iroh-inbox" \
+        "$rootfs_files/usr/bin/funkey-iroh-outbox" \
+        "$rootfs_files/usr/bin/funkey-iroh-postgame" \
+        "$rootfs_files/usr/bin/funkey-iroh-sync-worker" \
+        "$rootfs_files/usr/bin/funkey-iroh-session" \
+        "$rootfs_files/usr/bin/funkey-iroh-launch"
+    chmod 0644 \
+        "$rootfs_files/usr/lib/funkey-iroh/common.sh" \
+        "$rootfs_files/etc/funkey-iroh/adapters.tsv"
+
+    cat >> "$commands" <<EOF
+mkdir /usr/lib/funkey-iroh
+mkdir /etc/funkey-iroh
+write $rootfs_files/etc/init.d/S45funkey-iroh-sync /etc/init.d/S45funkey-iroh-sync
+write $rootfs_files/usr/bin/funkey-iroh-pairing /usr/bin/funkey-iroh-pairing
+write $rootfs_files/usr/bin/funkey-iroh-sync-peer /usr/bin/funkey-iroh-sync-peer
+write $rootfs_files/usr/bin/funkey-iroh-inbox /usr/bin/funkey-iroh-inbox
+write $rootfs_files/usr/bin/funkey-iroh-outbox /usr/bin/funkey-iroh-outbox
+write $rootfs_files/usr/bin/funkey-iroh-postgame /usr/bin/funkey-iroh-postgame
+write $rootfs_files/usr/bin/funkey-iroh-sync-worker /usr/bin/funkey-iroh-sync-worker
+write $rootfs_files/usr/bin/funkey-iroh-session /usr/bin/funkey-iroh-session
+write $rootfs_files/usr/bin/funkey-iroh-launch /usr/bin/funkey-iroh-launch
+write $rootfs_files/usr/lib/funkey-iroh/common.sh /usr/lib/funkey-iroh/common.sh
+write $rootfs_files/etc/funkey-iroh/adapters.tsv /etc/funkey-iroh/adapters.tsv
+write $ui_opk /usr/local/share/OPKs/Settings/iroh_funkey-s.opk
+EOF
+
+    wrapped_manifest="$backup_dir/wrapped-opks.tsv"
+    : > "$wrapped_manifest"
+    source_root="$repo/FunKey/package/picoarch/opk"
+    mkdir -p "$backup_dir/opks" "$backup_dir/unpacked"
+    wrapped_count=0
+
+    for source_directory in "$source_root"/*; do
+        [[ -d "$source_directory" ]] || continue
+        system=$(basename "$source_directory")
+        if [[ "$system" = picoarch ]]; then
+            opk_name=picoarch_funkey-s.opk
+        else
+            opk_name="${system}_picoarch_funkey-s.opk"
+        fi
+        embedded="/usr/local/share/OPKs/Libretro/$opk_name"
+        local_opk="$backup_dir/opks/${system}.opk"
+        unpack="$backup_dir/unpacked/$system"
+        patched_opk="$backup_dir/opks/${system}.wrapped.opk"
+
+        # debugfs can exit successfully even when the requested inode is
+        # absent. Require the output as well as a successful command.
+        if ! "$debugfs_bin" -R "dump $embedded $local_opk" "$funkey_rootfs" \
+            >/dev/null 2>&1 || [[ ! -s "$local_opk" ]]; then
+            printf 'failed to extract expected launcher: %s\n' "$embedded" >&2
+            return 1
+        fi
+
+        rm -rf "$unpack"
+        "$unsquashfs_bin" -no-progress -d "$unpack" "$local_opk" >/dev/null
+        desktop=$(find "$unpack" -maxdepth 2 -type f -name '*.desktop' -print -quit)
+        [[ -n "$desktop" ]] || {
+            printf 'no desktop entry found inside %s\n' "$embedded" >&2
+            return 1
+        }
+        original=$(sed -n 's/^Exec=//p' "$desktop" | head -n 1)
+        [[ -n "$original" ]] || {
+            printf 'desktop entry has no Exec line: %s\n' "$desktop" >&2
+            return 1
+        }
+
+        if ! grep -q 'funkey-iroh-launch' "$desktop"; then
+            sed -i \
+                "s#^Exec=.*#Exec=/usr/bin/funkey-iroh-launch --system $system -- $original#" \
+                "$desktop"
+        fi
+        if ! grep -q '^X-FunKey-Iroh-System=' "$desktop"; then
+            printf 'X-FunKey-Iroh-System=%s\n' "$system" >> "$desktop"
+        fi
+        find "$unpack" -exec touch -h -d "@$filesystem_time" {} +
+
+        rm -f "$patched_opk"
+        "$mksquashfs_bin" "$unpack" "$patched_opk" \
+            -all-root -noappend -no-exports -no-xattrs -quiet >/dev/null
+        {
+            printf 'rm %s\n' "$embedded"
+            printf 'write %s %s\n' "$patched_opk" "$embedded"
+        } >> "$commands"
+        printf '%s\t%s\t%s\t%s\n' \
+            "$system" "$embedded" "$patched_opk" \
+            "$(sha256sum "$patched_opk" | awk '{print $1}')" \
+            >> "$wrapped_manifest"
+        wrapped_count=$((wrapped_count + 1))
+    done
+
+    if (( wrapped_count == 0 )); then
+        printf 'no PicoArch launcher OPKs were found to wrap\n' >&2
+        return 1
+    fi
+    ;;
+verify)
+    dump_and_compare "$funkey_rootfs" /etc/init.d/S45funkey-iroh-sync \
+        "$rootfs_files/etc/init.d/S45funkey-iroh-sync" sync-init
+    dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-launch \
+        "$rootfs_files/usr/bin/funkey-iroh-launch" launch
+    dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-inbox \
+        "$rootfs_files/usr/bin/funkey-iroh-inbox" inbox
+    dump_and_compare "$funkey_rootfs" /usr/bin/funkey-iroh-postgame \
+        "$rootfs_files/usr/bin/funkey-iroh-postgame" postgame
+    dump_and_compare "$funkey_rootfs" /usr/lib/funkey-iroh/common.sh \
+        "$rootfs_files/usr/lib/funkey-iroh/common.sh" common
+    dump_and_compare "$funkey_rootfs" /etc/funkey-iroh/adapters.tsv \
+        "$rootfs_files/etc/funkey-iroh/adapters.tsv" adapters
+    dump_and_compare "$funkey_rootfs" /usr/local/share/OPKs/Settings/iroh_funkey-s.opk \
+        "$ui_opk" settings-opk
+
+    while IFS=$'\t' read -r system embedded patched expected_sha; do
+        [[ -n "$system" ]] || continue
+        dump="$backup_dir/${system}.embedded.opk"
+        "$debugfs_bin" -R "dump $embedded $dump" "$funkey_rootfs" >/dev/null 2>&1
+        actual_sha=$(sha256sum "$dump" | awk '{print $1}')
+        [[ "$actual_sha" = "$expected_sha" ]] || {
+            printf 'wrapped OPK checksum mismatch for %s\n' "$system" >&2
+            return 1
+        }
+        # OPKs are compressed SquashFS filesystems, not searchable text.
+        # Verify the actual desktop entry after extracting the read-back copy.
+        verified_unpack="$backup_dir/verified-$system"
+        rm -rf "$verified_unpack"
+        "$unsquashfs_bin" -no-progress -d "$verified_unpack" "$dump" >/dev/null
+        verified_desktop=$(find "$verified_unpack" -maxdepth 2 -type f \
+            -name '*.desktop' -print -quit)
+        if [[ -z "$verified_desktop" ]] ||
+           ! grep -Fq "Exec=/usr/bin/funkey-iroh-launch --system $system -- " "$verified_desktop" ||
+           ! grep -Fxq "X-FunKey-Iroh-System=$system" "$verified_desktop"; then
+            printf 'wrapped OPK lacks Iroh launch hook: %s\n' "$system" >&2
+            return 1
+        fi
+    done < "$wrapped_manifest"
+
+    cp "$ui_binary" "$repo/images/funkey-iroh-ui-${variant_version}"
+    cp "$ui_opk" "$repo/images/iroh-ui-${variant_version}.opk"
+    ;;
+*)
+    printf 'unknown augment mode: %s\n' "$mode" >&2
+    return 64
+    ;;
+esac

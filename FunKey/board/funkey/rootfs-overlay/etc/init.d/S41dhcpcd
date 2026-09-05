@@ -3,46 +3,80 @@
 # Start/stop dhcpcd
 #
 
+SELF=$(basename "$0")
 DAEMON=/sbin/dhcpcd
 CONFIG=/etc/dhcpcd.conf
-PIDFILE=/var/run/dhcpcd.pid
-[ -f /mnt/usbnet ] || exit 0
-[ -f $CONFIG ] || exit 0
+PIDFILE=/var/run/dhcpcd/pid
+. /usr/local/lib/usb_network
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_enabled >/dev/null 2>&1 || usb_debug_enabled() { return 1; }
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_run >/dev/null 2>&1 ||
+    usb_debug_run() { shift; "$@"; }
+
+[ -f "$CONFIG" ] || exit 0
+
+run_dhcpcd_daemon()
+{
+    if usb_debug_enabled; then
+        usb_debug_run dhcpcd-daemon "$@"
+    else
+        "$@" >/dev/null 2>&1
+    fi
+}
 
 case "$1" in
-  start)
-	echo -n "Starting dhcpcd: "
-	start-stop-daemon -S -x "$DAEMON" -p "$PIDFILE" -- -f "$CONFIG" > /dev/null 2>&1
-	if [ $? -eq 0 ]; then
-	  echo "OK"
-	else
-	  echo "ERROR"
-	fi
-	;;
-  stop)
-	echo -n "Stopping dhcpcd: "
-	start-stop-daemon -K -x "$DAEMON" -p "$PIDFILE" -o > /dev/null 2>&1
-	if [ $? -eq 0 ]; then
-	  echo "OK"
-	else
-	  echo "ERROR"
-	fi
-	;;
-  reload|force-reload)
-	echo -n "Reloading dhcpcd configuration: "
-	"$DAEMON" -s reload >/dev/null 2>&1
-	if [ $? -eq 0 ]; then
-	  echo "OK"
-	else
-	  echo "ERROR"
-	fi
-	;;
-  restart)
-	"$0" stop
-	sleep 1 # Prevent race condition: ensure dhcpcd stops before start.
-	"$0" start
-	;;
-  *)
-	echo "Usage: $0 {start|stop|restart|reload|force-reload}"
-	exit 1
+    start)
+        if ! usb_network_is_ready; then
+            usb_debug_log dhcpcd "start skipped because usb0 is not configured"
+            exit 0
+        fi
+        echo -n "Starting dhcpcd: "
+        run_dhcpcd_daemon start-stop-daemon -S -x "$DAEMON" -p "$PIDFILE" -o -- -f "$CONFIG"
+        daemon_status=$?
+        if [ "$daemon_status" -eq 0 ]; then
+            echo "OK"
+        else
+            echo "ERROR"
+        fi
+        usb_debug_log dhcpcd "start status=$daemon_status pidfile=$PIDFILE"
+        exit "$daemon_status"
+        ;;
+    stop)
+        echo -n "Stopping dhcpcd: "
+        run_dhcpcd_daemon start-stop-daemon -K -x "$DAEMON" -p "$PIDFILE" -o
+        daemon_status=$?
+        if [ "$daemon_status" -eq 0 ]; then
+            echo "OK"
+        else
+            echo "ERROR"
+        fi
+        usb_debug_log dhcpcd "stop status=$daemon_status pidfile=$PIDFILE"
+        exit "$daemon_status"
+        ;;
+    reload|force-reload)
+        echo -n "Reloading dhcpcd configuration: "
+        run_dhcpcd_daemon "$DAEMON" -s reload
+        daemon_status=$?
+        if [ "$daemon_status" -eq 0 ]; then
+            echo "OK"
+        else
+            echo "ERROR"
+        fi
+        usb_debug_log dhcpcd "reload status=$daemon_status"
+        exit "$daemon_status"
+        ;;
+    restart)
+        "$0" stop
+        sleep 1 # Prevent race condition: ensure dhcpcd stops before start.
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|reload|force-reload}"
+        exit 1
+        ;;
 esac

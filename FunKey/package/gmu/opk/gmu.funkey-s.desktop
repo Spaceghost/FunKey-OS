@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Gmu
+Comment=A multi-format music player
+Exec=/usr/bin/gmu/gmu.dge
+Icon=gmu
+Categories=applications

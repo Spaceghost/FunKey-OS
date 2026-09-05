@@ -1,0 +1,205 @@
+name: FunKey-OS Iroh Build
+
+on:
+  push:
+    branches: [rg-nano-next, master]
+    paths:
+      - '.github/workflows/iroh.yml'
+      - '.github/workflows/iroh-hardware-loop.yml'
+      - '.github/workflows/iroh-pr-hardware.yml'
+      - '.github/workflows/release.yml'
+      - 'docs/iroh.md'
+      - 'docs/iroh-ui.md'
+      - 'docs/release-readiness.md'
+      - 'Makefile'
+      - 'buildroot'
+      - 'FunKey/**'
+      - 'Recovery/**'
+      - 'scripts/**'
+      - 'tools/funkey-iroh/**'
+      - 'tools/funkey-iroh-ui/**'
+  pull_request:
+    branches: [rg-nano-next, master]
+    paths:
+      - '.github/workflows/iroh.yml'
+      - '.github/workflows/iroh-hardware-loop.yml'
+      - '.github/workflows/iroh-pr-hardware.yml'
+      - '.github/workflows/release.yml'
+      - 'docs/iroh.md'
+      - 'docs/iroh-ui.md'
+      - 'docs/release-readiness.md'
+      - 'Makefile'
+      - 'buildroot'
+      - 'FunKey/**'
+      - 'Recovery/**'
+      - 'scripts/**'
+      - 'tools/funkey-iroh/**'
+      - 'tools/funkey-iroh-ui/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: funkey-iroh-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04
+    timeout-minutes: 240
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      FORCE_UNSAFE_CONFIGURE: "1"
+      CARGO_TARGET_DIR: .cargo-target/funkey-iroh
+
+    steps:
+      - name: Install Focal firmware and native UI dependencies
+        run: |
+          apt-get update
+          apt-get install -y -q --no-install-recommends \
+            bash bc binutils build-essential busybox bzip2 ca-certificates cmake \
+            cpio curl cvs dash expect file fonts-dejavu-core gawk git gzip \
+            liblscp-dev libncurses5-dev libsdl1.2-dev libsdl-ttf2.0-dev locales \
+            mercurial openssh-client patch perl procps python3 python3-dev \
+            python3-distutils python3-setuptools rsync subversion tar unzip \
+            wget xxd xz-utils
+          ln -sfn /usr/bin/python3 /usr/local/bin/python
+          locale-gen en_US.UTF-8
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+
+      - name: Trust the container-mounted checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: arm-unknown-linux-musleabihf
+
+      - name: Cache source dependencies only
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            download
+          key: funkey-iroh-source-${{ runner.os }}-${{ hashFiles('tools/funkey-iroh/Cargo.toml', 'tools/funkey-iroh/Cargo.lock', 'FunKey/configs/funkey_defconfig') }}
+          restore-keys: |
+            funkey-iroh-source-${{ runner.os }}-
+
+      - name: Show pinned toolchains
+        run: |
+          rustc --version
+          cargo --version
+          zig version
+          sdl-config --version
+
+      - name: Verify committed dependency lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch tools/funkey-iroh/Cargo.lock
+          cargo metadata \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked \
+            --format-version 1 >/dev/null
+          git diff --exit-code -- tools/funkey-iroh/Cargo.lock
+
+      - name: Test native daemon, bundles, lifecycle helpers, and launcher UI
+        shell: bash
+        run: |
+          ./scripts/test-iroh-ui
+
+          cargo build \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked \
+            --bin funkey-iroh
+
+          cargo test \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked
+
+          test -x .cargo-target/funkey-iroh/debug/funkey-iroh
+
+          cc -std=gnu99 -O2 -Wall -Wextra -Werror \
+            $(sdl-config --cflags) \
+            tools/funkey-iroh-ui/main.c \
+            $(sdl-config --libs) -lSDL_ttf -lasound -lm \
+            -o .cargo-target/funkey-iroh-ui-native
+
+          SDL_VIDEODRIVER=dummy \
+            .cargo-target/funkey-iroh-ui-native --self-test
+
+          ./scripts/test-iroh-portability \
+            .cargo-target/funkey-iroh/debug/funkey-iroh \
+            .cargo-target/funkey-iroh-ui-native
+
+      - name: Build clean release and persistent USB-debug Iroh firmware
+        run: ./scripts/build-iroh-firmware
+
+      - name: Inspect target executables and embedded rootfs
+        shell: bash
+        run: |
+          daemon=.cargo-target/funkey-iroh/arm-unknown-linux-musleabihf/release/funkey-iroh
+          target_ui=$(find images -maxdepth 1 -type f \
+            -name 'funkey-iroh-ui-*-iroh*' -print -quit)
+          test -n "$target_ui"
+          file "$daemon" "$target_ui"
+          readelf -h "$daemon"
+          readelf -h "$target_ui"
+          if readelf -d "$daemon" 2>/dev/null | grep -q '(NEEDED)'; then
+            echo "target daemon is dynamically linked" >&2
+            exit 1
+          fi
+          readelf -d "$target_ui" | grep -q 'libSDL-1.2'
+          readelf -d "$target_ui" | grep -q 'libSDL_ttf'
+
+          version=$(make -s print-version)
+          for profile in iroh iroh-usb-debug; do
+            test -s "images/FunKey-rootfs-${version}-${profile}.fwu"
+            test -s "images/FunKey-sdcard-${version}-${profile}.img.xz"
+            test -s "images/SHA256SUMS-${version}-${profile}.txt"
+            test -s "images/packages-Firmware-size-${version}-${profile}.json"
+            test -s "images/packages-Firmware-size-${version}-${profile}.txt"
+            test -s "images/funkey-iroh-ui-${version}-${profile}"
+            test -s "images/iroh-ui-${version}-${profile}.opk"
+            (
+              cd images
+              sha256sum -c "SHA256SUMS-${version}-${profile}.txt"
+            )
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: FunKey-OS Iroh firmware
+          if-no-files-found: warn
+          include-hidden-files: true
+          path: |
+            images/FunKey-rootfs-*-iroh*.fwu
+            images/FunKey-sdcard-*-iroh*.img.xz
+            images/SHA256SUMS-*-iroh*.txt
+            images/packages-Firmware-size-*-iroh*.json
+            images/packages-Firmware-size-*-iroh*.txt
+            images/iroh-*.json
+            images/funkey-iroh-ui-*-iroh*
+            images/iroh-ui-*-iroh*.opk
+            tools/funkey-iroh/Cargo.lock
+            .cargo-target/funkey-iroh/arm-unknown-linux-musleabihf/release/funkey-iroh
+            .cargo-target/funkey-iroh/debug/funkey-iroh
+            .cargo-target/funkey-iroh-ui-native
+            br.log

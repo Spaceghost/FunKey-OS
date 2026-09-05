@@ -1,0 +1,108 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+sys="$tmp/sys"
+gadget="$tmp/gadget"
+mock="$tmp/mock"
+mkdir -p \
+    "$sys/class/net/usb0" \
+    "$sys/class/udc/test-udc" \
+    "$gadget/functions/rndis.usb0" \
+    "$mock"
+printf '%s\n' test-udc > "$gadget/UDC"
+printf '%s\n' configured > "$sys/class/udc/test-udc/state"
+printf '%s\n' high-speed > "$sys/class/udc/test-udc/current_speed"
+printf '%s\n' 12:34:56:78:9A:BC > "$gadget/functions/rndis.usb0/host_addr"
+
+cat > "$mock/ip" <<'EOF'
+#!/bin/sh
+printf 'ip %s\n' "$*" >> "$MOCK_LOG"
+if [ "$1" = -4 ]; then
+    printf '5: usb0: <UP> mtu 1500\n    inet 192.168.137.2/30 scope global usb0\n'
+    exit 0
+fi
+if [ "$1" = neigh ] && [ "$2" = del ]; then
+    exit 1
+fi
+exit 0
+EOF
+
+cat > "$mock/iptables" <<'EOF'
+#!/bin/sh
+printf 'iptables %s\n' "$*" >> "$MOCK_LOG"
+case "$1" in
+    -D|-F) exit 1 ;;
+    *) exit 0 ;;
+esac
+EOF
+chmod 0755 "$mock/ip" "$mock/iptables"
+
+export MOCK_LOG="$tmp/commands.log"
+export USB_NETWORK_SYSFS_ROOT="$sys"
+export USB_NETWORK_GADGET_ROOT="$gadget"
+export USB_NETWORK_IP="$mock/ip"
+export USB_NETWORK_IPTABLES="$mock/iptables"
+
+# shellcheck disable=SC1090
+. "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network"
+usb_network_is_ready
+[ "$(usb_network_host_mac)" = 12:34:56:78:9a:bc ]
+usb_network_install_ssh_guard
+
+grep -F -- \
+    'ip neigh add 192.168.137.1 lladdr 12:34:56:78:9a:bc nud permanent dev usb0' \
+    "$MOCK_LOG"
+grep -F -- \
+    'iptables -I FUNKEY_USB_SSH 1 -i usb0 -s 192.168.137.1 -d 192.168.137.2 -p tcp --dport 22 -m mac --mac-source 12:34:56:78:9a:bc -j ACCEPT' \
+    "$MOCK_LOG"
+grep -F -- 'iptables -A FUNKEY_USB_SSH -j DROP' "$MOCK_LOG"
+grep -F -- \
+    'iptables -I INPUT 1 -p tcp --dport 22 -j FUNKEY_USB_SSH' \
+    "$MOCK_LOG"
+
+for shell in dash 'busybox sh'; do
+    $shell -n "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network"
+    $shell -n "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+    $shell -n "$repo/Recovery/board/funkey/rootfs-overlay/etc/init.d/S42dropbear"
+done
+
+cmp \
+    "$repo/FunKey/board/funkey/rootfs-overlay/usr/local/lib/usb_network" \
+    "$repo/Recovery/board/funkey/rootfs-overlay/usr/local/lib/usb_network"
+grep -qx 'DROPBEAR_ARGS="-s -g"' \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/default/dropbear"
+grep -qx 'DROPBEAR_ARGS="-s -g"' \
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/default/dropbear"
+grep -q 'usb_network_install_ssh_guard' \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+grep -q -- '-p $DROPBEAR_BIND_ADDRESS:$DROPBEAR_PORT' \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/init.d/S50dropbear"
+
+for config in \
+    "$repo/FunKey/configs/funkey_defconfig" \
+    "$repo/Recovery/configs/recovery_defconfig"
+do
+    grep -qx 'BR2_PACKAGE_IPTABLES=y' "$config"
+done
+for config in \
+    "$repo/FunKey/board/funkey/linux.config" \
+    "$repo/Recovery/board/funkey/linux.config"
+do
+    grep -qx 'CONFIG_NETFILTER=y' "$config"
+    grep -qx 'CONFIG_NETFILTER_XT_MATCH_MAC=y' "$config"
+    grep -qx 'CONFIG_IP_NF_FILTER=y' "$config"
+done
+for config in \
+    "$repo/FunKey/board/funkey/rootfs-overlay/etc/dhcpcd.conf" \
+    "$repo/Recovery/board/funkey/rootfs-overlay/etc/dhcpcd.conf"
+do
+    grep -qx 'static ip_address=192.168.137.2/30' "$config"
+done
+
+[ "$(readlink "$repo/FunKey/board/funkey/rootfs-overlay/root/.ssh")" = /mnt/FunKey/.ssh ]
+[ "$(readlink "$repo/Recovery/board/funkey/rootfs-overlay/root/.ssh")" = /mnt/FunKey/.ssh ]
+
+printf 'USB SSH isolation tests: PASS\n'

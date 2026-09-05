@@ -1,28 +1,47 @@
 #!/bin/sh
 
-THIS=$(basename $0)
+SELF=$(basename "$0")
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_enabled >/dev/null 2>&1 || usb_debug_enabled() { return 1; }
+command -v usb_debug_run >/dev/null 2>&1 ||
+    usb_debug_run() { shift; "$@"; }
+
+run_share()
+{
+    share_action=$1
+    share_command=${SHARE_COMMAND:-/usr/local/sbin/share}
+    if usb_debug_enabled; then
+        # Trace the sourced gadget setup too; this is the earliest useful USB log.
+        usb_debug_run "share-$share_action" sh -x "$share_command" "$share_action"
+    else
+        "$share_command" "$share_action"
+    fi
+}
 
 case "$1" in
     start)
-	if share init; then
-	    echo "Starting share: OK"
-	    exit 0
-	else
-	    echo "Starting share: ERROR"
-	    exit 1
-	fi
-	;;
+        if run_share init; then
+            echo "Starting share: OK"
+            exit 0
+        else
+            echo "Starting share: ERROR"
+            exit 1
+        fi
+        ;;
     stop)
-	if share stop >/dev/null 2>&1; then
-	    echo "Stopping share: OK"
-	    exit 0
-	else
-	    echo "Stopping share: ERROR"
-	    exit 2
-	fi
-	;;
+        if run_share stop >/dev/null 2>&1; then
+            echo "Stopping share: OK"
+            exit 0
+        else
+            echo "Stopping share: ERROR"
+            exit 2
+        fi
+        ;;
     *)
-	echo "Usage: $0 {start|stop}" >&2
-	exit 3
-	;;
+        echo "Usage: $0 {start|stop}" >&2
+        exit 3
+        ;;
 esac

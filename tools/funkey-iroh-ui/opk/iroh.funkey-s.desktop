@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Iroh
+Comment=Pair devices, synchronize saves, and prepare multiplayer
+Exec=funkey-iroh-ui
+Icon=iroh
+Terminal=false
+Type=Application
+Categories=settings;

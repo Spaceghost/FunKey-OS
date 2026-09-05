@@ -1,0 +1,334 @@
+name: Validate and publish v2.4.0-rc.1
+
+on:
+  push:
+    branches: [rc/v2.4.0-rc.1]
+    paths:
+      - .github/workflows/publish-v2.4.0-rc.1.yml
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-v2.4.0-rc.1
+  cancel-in-progress: false
+
+jobs:
+  build-tag-release:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04
+    timeout-minutes: 360
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      FORCE_UNSAFE_CONFIGURE: "1"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target/funkey-iroh
+      RELEASE_TAG: v2.4.0-rc.1
+      FIRMWARE_VERSION: 2.4.0-rc.1
+
+    steps:
+      - name: Install build and release dependencies
+        run: |
+          apt-get update
+          apt-get install -y -q --no-install-recommends \
+            bash bc binutils build-essential busybox bzip2 ca-certificates cmake \
+            cpio curl cvs dash e2fsprogs expect file gawk git gzip jq \
+            libasound2-dev liblscp-dev libncurses5-dev libsdl1.2-dev \
+            libsdl-ttf2.0-dev locales mercurial openssh-client patch perl \
+            procps python3 python3-dev python3-distutils python3-setuptools \
+            rsync subversion tar unzip wget xxd xz-utils
+          ln -sfn /usr/bin/python3 /usr/local/bin/python
+          locale-gen en_US.UTF-8
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+        with:
+          ref: rc/v2.4.0-rc.1
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Trust checkout and stage the security boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin master rg-nano-next rc/v2.4.0-rc.1 --tags
+          git merge-base --is-ancestor origin/master HEAD
+          git merge-base --is-ancestor origin/rg-nano-next HEAD
+
+          python3 -m py_compile scripts/stage-usb-peer-ssh-rc.py
+          python3 scripts/stage-usb-peer-ssh-rc.py
+          rm -f \
+            scripts/stage-usb-peer-ssh-rc.py \
+            .github/workflows/publish-v2.4.0-rc.1.yml
+
+          bash -n scripts/test-usb-ssh-isolation
+          ./scripts/test-usb-ssh-isolation
+          git add -A
+          git diff --cached --check
+          git commit -m 'security: confine SSH to the directly attached USB peer' \
+            -m 'Bind Dropbear to 192.168.137.2 only; require public-key authentication; disable local and remote forwarding; install a fail-closed INPUT guard that accepts TCP/22 only from 192.168.137.1 on usb0 with the directly learned peer MAC; and drop all IPv6 SSH. The rule continues to isolate ordinary L2 bridges, while key authentication protects the unavoidable routed/NAT identity-collapse case.'
+
+          printf 'RELEASE_SHA=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          printf 'RELEASE_TREE=%s\n' "$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: arm-unknown-linux-musleabihf
+
+      - name: Validate native daemon, UI, lifecycle, and peer isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          zig version
+          ./scripts/test-usb-ssh-isolation
+          ./scripts/test-iroh-ui
+          cargo metadata \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked --format-version 1 >/dev/null
+          cargo build \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked --bin funkey-iroh
+          cargo test \
+            --manifest-path tools/funkey-iroh/Cargo.toml \
+            --locked
+          cc -std=gnu99 -O2 -Wall -Wextra -Werror \
+            $(sdl-config --cflags) \
+            tools/funkey-iroh-ui/main.c \
+            $(sdl-config --libs) -lSDL_ttf -lasound -lm \
+            -o .cargo-target/funkey-iroh-ui-native
+          SDL_VIDEODRIVER=dummy \
+            .cargo-target/funkey-iroh-ui-native --self-test
+          ./scripts/test-iroh-portability \
+            .cargo-target/funkey-iroh/debug/funkey-iroh \
+            .cargo-target/funkey-iroh-ui-native
+
+      - name: Build exact-tree Iroh and supervised USB-debug firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          export FUNKEY_VERSION="$FIRMWARE_VERSION"
+          ./scripts/build-iroh-firmware
+
+      - name: Verify packaged security policy and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$RELEASE_TREE"
+          git diff --exit-code
+          git diff --cached --exit-code
+
+          test -x FunKey/output/target/usr/local/sbin/funkey-usb-ssh-guard
+          test -r FunKey/output/target/usr/local/lib/funkey-usb-ssh-policy
+          test -x FunKey/output/target/usr/sbin/iptables || \
+            test -x FunKey/output/target/sbin/iptables || \
+            test -x FunKey/output/target/usr/bin/iptables
+          grep -q -- '-s -g -j -k -p 192.168.137.2:22' \
+            FunKey/output/target/etc/default/dropbear
+          grep -q 'BEGIN FUNKEY USB-PEER SSH POLICY' \
+            FunKey/output/target/etc/init.d/S50dropbear
+
+          for profile in iroh iroh-usb-debug; do
+            test -s "images/FunKey-rootfs-${FIRMWARE_VERSION}-${profile}.fwu"
+            test -s "images/FunKey-sdcard-${FIRMWARE_VERSION}-${profile}.img.xz"
+            test -s "images/SHA256SUMS-${FIRMWARE_VERSION}-${profile}.txt"
+            (
+              cd images
+              sha256sum -c "SHA256SUMS-${FIRMWARE_VERSION}-${profile}.txt"
+              xz -t "FunKey-sdcard-${FIRMWARE_VERSION}-${profile}.img.xz"
+            )
+          done
+
+          if grep -R -n --include='*dropbear*' -E '(^|[[:space:]])-B([[:space:]]|$)|0\.0\.0\.0:22|\[::\]:22' \
+              FunKey/output/target Recovery/output/target 2>/dev/null; then
+            echo 'packaged firmware contains an unsafe Dropbear listener or blank-password flag' >&2
+            exit 1
+          fi
+
+      - name: Assemble signed-by-hash RC assets and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release-assets
+          mkdir -p release-assets
+          find images -maxdepth 1 -type f \
+            \( -name "FunKey-rootfs-${FIRMWARE_VERSION}-iroh*.fwu" \
+            -o -name "FunKey-sdcard-${FIRMWARE_VERSION}-iroh*.img.xz" \
+            -o -name "SHA256SUMS-${FIRMWARE_VERSION}-iroh*.txt" \
+            -o -name "packages-Firmware-size-${FIRMWARE_VERSION}-iroh*.json" \
+            -o -name "packages-Firmware-size-${FIRMWARE_VERSION}-iroh*.txt" \
+            -o -name "iroh-${FIRMWARE_VERSION}-iroh*.json" \
+            -o -name "funkey-iroh-ui-${FIRMWARE_VERSION}-iroh*" \
+            -o -name "iroh-ui-${FIRMWARE_VERSION}-iroh*.opk" \) \
+            -exec cp -a {} release-assets/ \;
+
+          test -s "release-assets/FunKey-rootfs-${FIRMWARE_VERSION}-iroh.fwu"
+          test -s "release-assets/FunKey-sdcard-${FIRMWARE_VERSION}-iroh.img.xz"
+          test -s "release-assets/FunKey-rootfs-${FIRMWARE_VERSION}-iroh-usb-debug.fwu"
+          test -s "release-assets/FunKey-sdcard-${FIRMWARE_VERSION}-iroh-usb-debug.img.xz"
+
+          cat > release-assets/RELEASE-NOTES.md <<EOF
+          # FunKey-OS RG Nano ${RELEASE_TAG}
+
+          This release candidate reconciles the RG Nano integration line with
+          DrUm78/FunKey-OS master and includes the Iroh save, savestate,
+          portable-library, launcher, and supervised USB-debug work.
+
+          ## SSH boundary
+
+          SSH/SFTP listens only on the point-to-point USB address
+          \`192.168.137.2:22\`. Password login and both SSH forwarding
+          directions are disabled. The device firewall permits TCP/22 only
+          from \`192.168.137.1\` arriving on \`usb0\` with the MAC address
+          learned for that directly attached peer. All other IPv4 and all IPv6
+          TCP/22 traffic is dropped.
+
+          Put the controlling machine's public key in
+          \`FunKey/.ssh/authorized_keys\` on the writable data partition.
+          SSH refuses to start without a key, including USB-debug builds.
+
+          A conventional layer-2 bridge preserves downstream MAC addresses and
+          remains isolated by these rules. If the directly attached computer
+          deliberately routes, NATs, or proxies traffic, it replaces the
+          downstream identity with its own; key-only authentication is the
+          cryptographic boundary for that unavoidable case.
+
+          ## Images
+
+          - \`-iroh.img.xz\`: normal full-card RC image.
+          - \`-iroh.fwu\`: normal in-place firmware update.
+          - \`-iroh-usb-debug.img.xz\`: supervised full-card image with the
+            persistent Recovery diagnostics, still key-only and peer-filtered.
+          - \`-iroh-usb-debug.fwu\`: corresponding supervised update.
+
+          Physical RG Nano validation remains pending, which is why this is an
+          RC rather than \`v2.4.0\`.
+          EOF
+          sed -i 's/^          //' release-assets/RELEASE-NOTES.md
+
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path('release-assets/PROVENANCE.json')
+          p.write_text(json.dumps({
+              'tag': os.environ['RELEASE_TAG'],
+              'commit': os.environ['RELEASE_SHA'],
+              'tree': os.environ['RELEASE_TREE'],
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'native_tests': 'passed',
+              'firmware_build': 'passed',
+              'usb_peer_ssh_isolation': 'passed',
+              'hardware_validation': 'pending',
+          }, indent=2, sort_keys=True) + '\n')
+          PY
+          cp docs/usb-peer-ssh.md release-assets/USB-PEER-SSH.md
+          (
+            cd release-assets
+            sha256sum $(find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' | sort) \
+              > SHA256SUMS.txt
+          )
+
+      - name: Fast-forward integration branches and create annotated tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin master rg-nano-next rc/v2.4.0-rc.1 --tags
+          git merge-base --is-ancestor origin/master HEAD
+          git merge-base --is-ancestor origin/rg-nano-next HEAD
+          git merge-base --is-ancestor origin/rc/v2.4.0-rc.1 HEAD
+
+          git push --atomic origin \
+            HEAD:refs/heads/master \
+            HEAD:refs/heads/rg-nano-next \
+            HEAD:refs/heads/rc/v2.4.0-rc.1
+
+          remote_tag=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG^{}" | awk '{print $1}')
+          if [ -n "$remote_tag" ]; then
+            test "$remote_tag" = "$RELEASE_SHA"
+          else
+            git tag -a "$RELEASE_TAG" \
+              -m "FunKey-OS RG Nano $RELEASE_TAG" \
+              -m "commit=$RELEASE_SHA" \
+              -m "tree=$RELEASE_TREE" \
+              -m "usb_peer_ssh_isolation=passed" \
+              -m "hardware_validation=pending"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+      - name: Create prerelease and upload verified firmware
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          auth=(-H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+
+          status=$(curl -sS -o release.json -w '%{http_code}' "${auth[@]}" \
+            "$api/releases/tags/$RELEASE_TAG")
+          if [ "$status" = 404 ]; then
+            python3 - <<'PY' > create-release.json
+          import json, os, pathlib
+          print(json.dumps({
+              'tag_name': os.environ['RELEASE_TAG'],
+              'target_commitish': os.environ['RELEASE_SHA'],
+              'name': f"FunKey-OS RG Nano {os.environ['RELEASE_TAG']}",
+              'body': pathlib.Path('release-assets/RELEASE-NOTES.md').read_text(),
+              'draft': False,
+              'prerelease': True,
+              'make_latest': 'false',
+          }))
+          PY
+            curl -fsS "${auth[@]}" -H 'Content-Type: application/json' \
+              -d @create-release.json "$api/releases" > release.json
+          elif [ "$status" != 200 ]; then
+            cat release.json >&2
+            exit 1
+          fi
+
+          release_id=$(jq -r .id release.json)
+          test "$release_id" != null
+          test "$(jq -r .target_commitish release.json)" = "$RELEASE_SHA" || \
+            test "$(git rev-list -n1 "$RELEASE_TAG")" = "$RELEASE_SHA"
+
+          for asset in release-assets/*; do
+            name=$(basename "$asset")
+            existing=$(curl -fsS "${auth[@]}" "$api/releases/$release_id/assets?per_page=100" |
+              jq -r --arg name "$name" '.[] | select(.name == $name) | .id' | head -n1)
+            [ -z "$existing" ] || continue
+            encoded=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$name")
+            curl --fail-with-body --retry 5 --retry-all-errors \
+              "${auth[@]}" -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$asset" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$encoded" \
+              >/dev/null
+          done
+
+          expected=$(find release-assets -maxdepth 1 -type f | wc -l)
+          uploaded=$(curl -fsS "${auth[@]}" "$api/releases/$release_id/assets?per_page=100" | jq length)
+          [ "$uploaded" -ge "$expected" ]
+          curl -fsS "${auth[@]}" "$api/releases/tags/$RELEASE_TAG" |
+            jq -e --arg sha "$RELEASE_SHA" \
+              '.tag_name == "v2.4.0-rc.1" and .prerelease == true and .draft == false' >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: FunKey-OS-v2.4.0-rc.1-release-evidence
+          if-no-files-found: warn
+          include-hidden-files: true
+          path: |
+            release-assets/
+            br.log

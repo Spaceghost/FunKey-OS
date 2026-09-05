@@ -1,0 +1,56 @@
+name: Harden USB SSH for v2.4.0-rc.1
+
+on:
+  push:
+    branches:
+      - rc/v2.4.0-rc.1
+    paths:
+      - .github/workflows/harden-usb-ssh.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harden-usb-ssh-v2.4.0-rc.1
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rc/v2.4.0-rc.1
+          fetch-depth: 0
+          submodules: false
+
+      - name: Apply and validate the bridge-safe SSH boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends busybox dash
+
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 .github/scripts/apply_usb_ssh_hardening_v2.py
+          bash -n scripts/test-usb-ssh-guard
+          ./scripts/test-usb-ssh-guard
+          git diff --check
+
+          git add \
+            FunKey \
+            Recovery \
+            docs/usb-ssh-isolation.md \
+            scripts/test-usb-ssh-guard
+          git diff --cached --check
+          git commit \
+            -m 'security: confine SSH to the directly attached USB host' \
+            -m 'Bind Dropbear to the gadget /30, pin the direct peer, and fail closed behind an interface, source-IP, destination-IP, and gadget-assigned source-MAC gate. Require public-key authentication in standard, Iroh, USB-debug, and Recovery images.'
+
+          git push origin \
+            HEAD:refs/heads/rc/v2.4.0-rc.1 \
+            HEAD:refs/heads/rg-nano-next

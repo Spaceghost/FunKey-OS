@@ -1,96 +1,160 @@
 #!/bin/sh
-# Update partition script
+# SWUpdate post-install script for the normal root partition.
 
-source /usr/local/lib/utils
+SELF=$(basename "$0")
+. /usr/local/lib/utils
+
+USB_DEBUG_LIB=${USB_DEBUG_LIB:-/usr/local/lib/usb_debug}
+if [ -r "$USB_DEBUG_LIB" ]; then
+    . "$USB_DEBUG_LIB"
+fi
+command -v usb_debug_log >/dev/null 2>&1 || usb_debug_log() { :; }
+command -v usb_debug_run >/dev/null 2>&1 ||
+    usb_debug_run() { shift; "$@"; }
+command -v usb_debug_snapshot >/dev/null 2>&1 || usb_debug_snapshot() { :; }
+command -v usb_debug_set_update_state >/dev/null 2>&1 || usb_debug_set_update_state() { :; }
 
 root_part_num=2
 root_part=/dev/mmcblk0p${root_part_num}
 root_mount=/tmp/rootfs
 
-# Compatibility issue with older Recovery notifications
+# Compatibility with both newer `notif set` and older `notif_set` Recovery images.
 if [ -x /usr/local/sbin/notif ]; then
-    alias notif_set="notif set"
+    notif_set()
+    {
+        notif set "$@"
+    }
 fi
+
+update_partition_fail()
+{
+    update_partition_status=$1
+    update_partition_state=$2
+    shift 2
+    usb_debug_set_update_state "$update_partition_state"
+    usb_debug_log update-partition "failure status=$update_partition_status state=$update_partition_state message=$*"
+    usb_debug_snapshot "$update_partition_state"
+    notif_set 0 "$*"
+    exit "$update_partition_status"
+}
 
 do_preinst()
 {
+    usb_debug_set_update_state swupdate-preinstall
+    usb_debug_log update-partition "preinstall root_part=$root_part"
+    usb_debug_snapshot swupdate-preinstall
     notif_set 0 " 1/4 EXTRACT FIRMWARE UPDATE..^DO NOT TURN OFF THE CONSOLE"
     exit 0
 }
 
 do_postinst()
 {
-
     #################
     # Resize Rootfs #
     #################
+    usb_debug_set_update_state resizing-rootfs
     notif_set 0 " 2/4 RESIZE ROOT FILESYSTEM^DO NOT TURN OFF THE CONSOLE"
-    resize2fs ${root_part}
-    if [ $? -ne 0 ]; then
-        notif_set 0 " CANNOT RESIZE ROOT^FILESYSTEM"
-        exit 1
+    usb_debug_run update-resize resize2fs "$root_part"
+    update_partition_status=$?
+    if [ "$update_partition_status" -ne 0 ]; then
+        update_partition_fail "$update_partition_status" resize-failed \
+            " CANNOT RESIZE ROOT^FILESYSTEM"
     fi
 
     ##############################
     # SHARED PARTITION PROCESSES #
     ##############################
+    usb_debug_set_update_state mounting-new-rootfs
     notif_set 0 " 3/4 COPY FILES TO USB MOUNT^DO NOT TURN OFF THE CONSOLE"
-    
-    # Mount Rootfs
-    mkdir -p ${root_mount}
-    mount -t ext4 ${root_part} ${root_mount}
-    if [ $? -ne 0 ]; then
-        notif_set 0 "CANNOT MOUNT ROOT^FILESYSTEM"
-        exit 1
+
+    mkdir -p "$root_mount"
+    usb_debug_run update-mount mount -t ext4 "$root_part" "$root_mount"
+    update_partition_status=$?
+    if [ "$update_partition_status" -ne 0 ]; then
+        update_partition_fail "$update_partition_status" root-mount-failed \
+            "CANNOT MOUNT ROOT^FILESYSTEM"
     fi
-    
-    # Copy OPKs
-    cp -r ${root_mount}/usr/local/share/OPKs/* /mnt
 
-    # Copy freeware games and other necessary mnt files
-    unzip -q -n ${root_mount}/usr/local/share/freeware_games.zip -d /mnt/
-    unzip -q -n ${root_mount}/usr/local/share/funkey_files.zip -d /mnt/
+    usb_debug_set_update_state copying-shared-assets
 
-    # Remove previous OPKs for default emulators
-    rm /mnt/Emulators/gb_gbc_gnuboy_funkey-s.opk
-    rm /mnt/Emulators/gba_gpsp_funkey-s.opk
-    rm /mnt/Emulators/lynx_mednafen_funkey-s.opk
-    rm /mnt/Emulators/megadrive_picodrive_funkey-s.opk
-    rm /mnt/Emulators/nes_fceux_funkey-s.opk
-    rm /mnt/Emulators/ngp_mednafen_funkey-s.opk
-    rm /mnt/Emulators/pce_mednafen_funkey-s.opk
-    rm /mnt/Emulators/ps1_pcsx_funkey-s.opk
-    rm /mnt/Emulators/snes_pocketsnes_funkey-s.opk
-    rm /mnt/Emulators/wonderswan_mednafen_funkey-s.opk
-    rm /mnt/Applications/commander-funkey-s.opk
+    # Copy OPKs. Asset failures are recorded but retain the historical behavior:
+    # the newly written rootfs remains bootable even if optional shared files fail.
+    usb_debug_run update-copy-opks \
+        cp -r "$root_mount"/usr/local/share/OPKs/* /mnt
+    usb_debug_log update-partition "copy_opks_status=$?"
 
-    # Unmount Rootfs
-    umount ${root_mount}
-    if [ $? -ne 0 ]; then
-        notif_set 0 "CANNOT UNMOUNT ROOT^FILESYSTEM"
-        exit 1
+    # Custom firmware may inject the optional freeware pack. Public updates
+    # leave existing games alone instead of carrying an unchanged pack.
+    if [ -f "$root_mount/usr/local/share/freeware_games.zip" ]; then
+        usb_debug_run update-freeware \
+            unzip -q -n "$root_mount/usr/local/share/freeware_games.zip" -d /mnt/
+        usb_debug_log update-partition "freeware_status=$?"
     fi
+
+    # Copy the files required by the launcher and emulators.
+    usb_debug_run update-funkey-files \
+        unzip -q -n "$root_mount/usr/local/share/funkey_files.zip" -d /mnt/
+    usb_debug_log update-partition "funkey_files_status=$?"
+
+    # Remove superseded default emulator packages without turning absent files
+    # into misleading update errors.
+    usb_debug_run update-remove-legacy rm -f \
+        /mnt/Emulators/gb_gbc_gnuboy_funkey-s.opk \
+        /mnt/Emulators/gba_gpsp_funkey-s.opk \
+        /mnt/Emulators/lynx_mednafen_funkey-s.opk \
+        /mnt/Emulators/megadrive_picodrive_funkey-s.opk \
+        /mnt/Emulators/nes_fceux_funkey-s.opk \
+        /mnt/Emulators/ngp_mednafen_funkey-s.opk \
+        /mnt/Emulators/pce_mednafen_funkey-s.opk \
+        /mnt/Emulators/ps1_pcsx_funkey-s.opk \
+        /mnt/Emulators/snes_pocketsnes_funkey-s.opk \
+        /mnt/Emulators/wonderswan_mednafen_funkey-s.opk \
+        /mnt/Applications/commander-funkey-s.opk
+    usb_debug_log update-partition "remove_legacy_status=$?"
+
+    usb_debug_set_update_state unmounting-new-rootfs
+    usb_debug_run update-umount umount "$root_mount"
+    update_partition_status=$?
+    if [ "$update_partition_status" -ne 0 ]; then
+        update_partition_fail "$update_partition_status" root-unmount-failed \
+            "CANNOT UNMOUNT ROOT^FILESYSTEM"
+    fi
+
+    usb_debug_set_update_state postinstall-complete
+    usb_debug_snapshot swupdate-postinstall-complete
 
     #####################
     # Erase update file #
     #####################
-    for file in $(ls /mnt/FunKey-*.fwu); do
+    set -- /mnt/FunKey-*.fwu
+    if [ "$#" -eq 1 ] && [ -f "$1" ]; then
         notif_set 0 " 4/4 ERASE UPDATE FILE^DO NOT TURN OFF THE CONSOLE"
-        rm -f "${file}"
-    done
+        usb_debug_run update-remove-archive rm -f "$1"
+        update_partition_status=$?
+        if [ "$update_partition_status" -ne 0 ]; then
+            update_partition_fail "$update_partition_status" archive-remove-failed \
+                "CANNOT ERASE UPDATE^FILE"
+        fi
+    else
+        usb_debug_log update-partition "archive removal skipped count=$#"
+    fi
+
+    usb_debug_set_update_state swupdate-postinstall-done
+    usb_debug_log update-partition "postinstall complete"
+    usb_debug_snapshot swupdate-postinstall-done
     exit 0
 }
 
-echo $0 $1
+echo "$0 $1"
 
 case "$1" in
-preinst)
-    do_preinst
-    ;;
-postinst)
-    do_postinst
-    ;;
-*)
-    exit 1
-    ;;
+    preinst)
+        do_preinst
+        ;;
+    postinst)
+        do_postinst
+        ;;
+    *)
+        exit 1
+        ;;
 esac
