@@ -20,90 +20,32 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Collect source fixtures
-        shell: bash
+      - name: Install isolated test dependencies
         run: |
-          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ninja-build squashfs-tools
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           mkdir -p probe
-          python3 - <<'PY'
-          import pathlib, subprocess, tarfile
-          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
-          with tarfile.open('probe/source-text.tar.gz', 'w:gz') as archive:
-              for name in paths:
-                  path = pathlib.Path(name)
-                  if not name or not path.is_file() or path.stat().st_size > 2_000_000:
-                      continue
-                  if path.suffix.lower() in {'.ttf', '.otf', '.woff', '.woff2', '.bdf', '.pcf'}:
-                      continue
-                  data = path.read_bytes()
-                  if b'\0' in data:
-                      continue
-                  try:
-                      data.decode('utf-8')
-                  except UnicodeDecodeError:
-                      continue
-                  archive.add(path, arcname=name, recursive=False)
-          PY
-      - name: Exercise code generation and exact stdin macro probes
+      - name: Check compiler, packaging, and USB regressions
         shell: bash
         run: |
           set -euo pipefail
-          printf 'int main(void) { return 0; }\n' > probe/main.c
-          cp probe/main.c probe/main.cpp
-          for candidate in legacy clang baseline target; do
-            case "$candidate" in
-              legacy) flags=(-march=x86_64) ;;
-              clang) flags=(-march=x86-64) ;;
-              baseline) flags=(-mcpu=baseline) ;;
-              target) flags=(-target x86_64-linux-gnu) ;;
-            esac
-            for driver in cc c++; do
-              source=probe/main.c
-              [[ "$driver" = cc ]] || source=probe/main.cpp
-              for phase in macros stdin typed-stdin link; do
-                case "$phase" in
-                  macros) args=(-E -dM -x c /dev/null) ;;
-                  stdin) args=(-E -dM -) ;;
-                  typed-stdin) args=(-E -dM -x c -) ;;
-                  link) args=("$source" -o probe/main) ;;
-                esac
-                status=0
-                zig "$driver" "${args[@]}" "${flags[@]}" </dev/null \
-                  >"probe/$candidate-$driver-$phase.out" \
-                  2>"probe/$candidate-$driver-$phase.err" || status=$?
-                if [[ "$phase" = link && "$status" = 0 ]]; then
-                  ./probe/main >/dev/null || status=$?
-                fi
-                printf '%s %s %s exit=%s\n' "$candidate" "$driver" "$phase" "$status" | tee -a probe/results.txt
-                head -c 400 "probe/$candidate-$driver-$phase.err"
-                printf '\n'
-              done
-            done
+          for test in test-zig-host-compiler test-iroh-opk test-firmware-update test-usb-network-hotplug test-usb-menu-info test-usb-debug test-usb-ssh-guard; do
+            ./scripts/$test 2>&1 | tee "probe/$test.log"
           done
-      - name: Exercise Meson 0.56 with the real wrappers
+          FUNKEY_IROH_RUNTIME_DIR="$RUNNER_TEMP/iroh-test" \
+          FUNKEY_IROH_ENDPOINT_LOCK="$RUNNER_TEMP/iroh-test.lock" \
+            ./scripts/test-iroh-ui 2>&1 | tee probe/test-iroh-ui.log
+      - name: Configure a real Meson 0.56 C and C++ project
         shell: bash
         run: |
           set -euo pipefail
           git clone --depth=1 --branch 0.56.0 https://github.com/mesonbuild/meson.git "$RUNNER_TEMP/meson"
+          ./scripts/install-zig-host-tools "$RUNNER_TEMP/host-bin"
           mkdir -p probe/project
           printf "project('probe', 'c', 'cpp')\n" > probe/project/meson.build
-          for candidate in legacy baseline target; do
-            mkdir -p "probe/$candidate"
-            cp scripts/zig-host-compiler "probe/$candidate/host-cc"
-            case "$candidate" in
-              baseline) sed -i 's/-march=x86_64/-mcpu=baseline/' "probe/$candidate/host-cc" ;;
-              target) sed -i 's/-march=x86_64/-target x86_64-linux-gnu/' "probe/$candidate/host-cc" ;;
-            esac
-            chmod +x "probe/$candidate/host-cc"
-            ln -s host-cc "probe/$candidate/host-c++"
-            status=0
-            CC="$PWD/probe/$candidate/host-cc" CXX="$PWD/probe/$candidate/host-c++" \
-              python3 "$RUNNER_TEMP/meson/meson.py" setup "probe/$candidate/build" probe/project \
-              >"probe/$candidate/meson.out" 2>&1 || status=$?
-            printf 'meson %s exit=%s\n' "$candidate" "$status" | tee -a probe/results.txt
-            tail -n 18 "probe/$candidate/meson.out"
-          done
+          CC="$RUNNER_TEMP/host-bin/zig-host-cc" CXX="$RUNNER_TEMP/host-bin/zig-host-c++" \
+            python3 "$RUNNER_TEMP/meson/meson.py" setup probe/build probe/project 2>&1 | tee probe/meson.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
