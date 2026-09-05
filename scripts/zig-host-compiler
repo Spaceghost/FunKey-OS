@@ -32,27 +32,14 @@ for arg in "$@"; do
 	fi
 done
 
-# Cached host tools must run on any runner of the same architecture. Zig's
-# native default may use instructions available on the machine compiling the
-# cache but absent from the machine restoring it, so select an architecture
-# baseline and discard caller-supplied CPU tuning whenever one is known.
+# Keep the native OS and ABI so host headers and libraries remain visible.
+# An explicit Linux triple disables Zig's native search paths, hiding crypt.h
+# and libcrypt and making later Autoconf function checks fail spuriously.
+# Select the CPU separately: cached tools must not require the build runner's
+# newer instructions. Use Zig's baseline spelling, not Clang's -march names.
 portable_cpu_args=()
 case "$(uname -m)" in
-	x86_64)
-		case "$(uname -s)" in
-			Linux)
-				# Zig 0.16 forwards untyped stdin preprocessing to Clang,
-				# which rejects Zig's x86_64 CPU spelling. An explicit
-				# target selects the baseline CPU on both code paths.
-				# Match the host libc rather than Zig's own build ABI.
-				if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
-					portable_cpu_args=(-target x86_64-linux-gnu)
-				else
-					portable_cpu_args=(-target x86_64-linux-musl)
-				fi ;;
-			*) portable_cpu_args=(-march=x86_64) ;;
-		esac ;;
-	aarch64|arm64) portable_cpu_args=(-mcpu=generic) ;;
+	x86_64|aarch64|arm64) portable_cpu_args=(-target native -mcpu=baseline) ;;
 esac
 
 # Old libtool releases pass GNU ld scripts as bare compiler-driver inputs.
