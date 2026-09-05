@@ -243,3 +243,7 @@ jobs:
             images/packages-*.json
             images/packages-*.txt
             br.log
+            FunKey/output/build/**/config.log
+            Recovery/output/build/**/config.log
+            FunKey/output/build/**/meson-logs/meson-log.txt
+            Recovery/output/build/**/meson-logs/meson-log.txt
