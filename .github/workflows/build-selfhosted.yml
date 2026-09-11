@@ -1,0 +1,150 @@
+name: RG Nano self-hosted build
+
+on:
+  push:
+    branches: [rg-nano-next]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rg-nano-selfhosted-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  FORCE_UNSAFE_CONFIGURE: "1"
+  FUNKEY_CI_IMAGE_DIGEST: selfhosted-ubuntu20-v1
+  FUNKEY_CI_IMAGE_REVISION: selfhosted-ubuntu20-v1
+  BR2_DL_DIR: ${{ github.workspace }}/download
+  BR2_CCACHE_DIR: ${{ github.workspace }}/.buildroot-ccache
+  CCACHE_DIR: ${{ github.workspace }}/.buildroot-ccache
+
+jobs:
+  build:
+    name: build RG Nano firmware on fleet
+    runs-on: [self-hosted, firmware-builder, linux-x64, funkey-builder]
+    timeout-minutes: 180
+    steps:
+      - name: Check out firmware sources
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          submodules: recursive
+
+      - name: Verify pinned self-hosted environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 20.04
+          test "$(uname -m)" = x86_64
+          test "$(zig version)" = 0.16.0
+          test "$(python --version 2>&1)" = 'Python 3.8.10'
+          git --version
+          gcc --version | sed -n '1p'
+
+      - name: Validate update/debug tooling
+        run: |
+          ./scripts/test-firmware-update
+          ./scripts/test-usb-network-hotplug
+          ./scripts/test-usb-menu-info
+          ./scripts/test-usb-debug
+
+      - name: Compute cache fingerprints
+        id: cache-meta
+        run: ./scripts/ci-cache-metadata >> "$GITHUB_OUTPUT"
+
+      - name: Prepare cache directories
+        run: mkdir -p download "$BR2_CCACHE_DIR" FunKey/output Recovery/output
+
+      - name: Restore Buildroot downloads
+        id: cache-downloads
+        uses: actions/cache/restore@v5
+        with:
+          path: download
+          key: rg-nano-selfhosted-downloads-${{ steps.cache-meta.outputs.scope }}-${{ github.run_id }}
+          restore-keys: |
+            rg-nano-selfhosted-downloads-${{ steps.cache-meta.outputs.scope }}-
+            rg-nano-selfhosted-downloads-
+
+      - name: Restore compiler cache
+        id: cache-ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: .buildroot-ccache
+          key: rg-nano-selfhosted-ccache-${{ steps.cache-meta.outputs.ccache }}-${{ github.run_id }}
+          restore-keys: |
+            rg-nano-selfhosted-ccache-${{ steps.cache-meta.outputs.ccache }}-
+
+      - name: Restore exact Recovery state
+        id: cache-recovery
+        uses: actions/cache/restore@v5
+        with:
+          path: Recovery/output
+          key: rg-nano-selfhosted-recovery-${{ steps.cache-meta.outputs.recovery }}
+
+      - name: Restore exact FunKey state
+        id: cache-funkey
+        uses: actions/cache/restore@v5
+        with:
+          path: FunKey/output
+          key: rg-nano-selfhosted-funkey-${{ steps.cache-meta.outputs.funkey }}
+
+      - name: Build production and USB-debug variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" zig-all
+          ./scripts/build-usb-variants "$(make -s print-version)"
+
+      - name: Save exact Recovery state
+        if: ${{ success() && steps.cache-recovery.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: Recovery/output
+          key: rg-nano-selfhosted-recovery-${{ steps.cache-meta.outputs.recovery }}
+
+      - name: Save exact FunKey state
+        if: ${{ success() && steps.cache-funkey.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: FunKey/output
+          key: rg-nano-selfhosted-funkey-${{ steps.cache-meta.outputs.funkey }}
+
+      - name: Save compiler cache
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: .buildroot-ccache
+          key: rg-nano-selfhosted-ccache-${{ steps.cache-meta.outputs.ccache }}-${{ github.run_id }}
+
+      - name: Save downloads
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: download
+          key: rg-nano-selfhosted-downloads-${{ steps.cache-meta.outputs.scope }}-${{ github.run_id }}
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RG-Nano-selfhosted-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            images/*.fwu
+            images/*.img.xz
+            images/SHA256SUMS-*.txt
+            images/packages-*.json
+            images/packages-*.txt
+            br.log
