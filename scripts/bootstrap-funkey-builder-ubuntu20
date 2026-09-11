@@ -1,0 +1,83 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=${FUNKEY_RUNNER_REPO:-Spaceghost/FunKey-OS}
+runner_version=${RUNNER_VERSION:-2.337.0}
+runner_sha256=${RUNNER_SHA256:-70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613}
+zig_version=${ZIG_VERSION:-0.16.0}
+zig_sha256=${ZIG_SHA256:-70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00}
+runner_user=${RUNNER_USER:-ghrunner}
+runner_dir=${RUNNER_DIR:-/opt/actions-runner-funkey-os}
+host=${RUNNER_HOSTNAME:-$(hostname | tr -c 'A-Za-z0-9._-' '-')}
+name=${RUNNER_NAME:-$host-funkey-os}
+labels=${RUNNER_LABELS:-firmware-builder,linux-x64,funkey-builder}
+
+[[ $(uname -m) == x86_64 ]] || { echo 'x86_64 builder required' >&2; exit 2; }
+. /etc/os-release
+[[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 20.04 ]] || {
+  echo 'run this inside an Ubuntu 20.04 Incus/Distrobox environment' >&2
+  exit 2
+}
+command -v sudo >/dev/null || { echo 'sudo is required' >&2; exit 2; }
+
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+  bash bc binutils build-essential busybox bzip2 ca-certificates cmake cpio curl cvs expect \
+  file gawk gh git gzip liblscp-dev libncurses5-dev locales mercurial openssh-client \
+  patch perl procps python3 python3-dev python3-distutils python3-setuptools rsync \
+  subversion tar unzip wget xxd xz-utils zstd
+sudo ln -sfn /usr/bin/python3 /usr/local/bin/python
+sudo locale-gen en_US.UTF-8 >/dev/null
+
+if [[ ! -x /opt/zig/zig || "$(/opt/zig/zig version 2>/dev/null || true)" != "$zig_version" ]]; then
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  wget -q "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz" -O "$tmp/zig.tar.xz"
+  printf '%s  %s\n' "$zig_sha256" "$tmp/zig.tar.xz" | sha256sum -c -
+  sudo rm -rf /opt/zig
+  sudo mkdir -p /opt/zig
+  sudo tar -xJf "$tmp/zig.tar.xz" --strip-components=1 -C /opt/zig
+fi
+sudo ln -sfn /opt/zig/zig /usr/local/bin/zig
+
+token=${RUNNER_REGISTRATION_TOKEN:-}
+if [[ -z "$token" ]]; then
+  gh auth status -h github.com >/dev/null 2>&1 || {
+    echo 'Provide RUNNER_REGISTRATION_TOKEN, or authenticate gh on this trusted controller.' >&2
+    exit 1
+  }
+  token=$(gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token)
+fi
+
+id "$runner_user" >/dev/null 2>&1 || sudo useradd --system --create-home --home-dir "/var/lib/$runner_user" --shell /bin/bash "$runner_user"
+sudo mkdir -p "$runner_dir"
+sudo chown "$runner_user:$runner_user" "$runner_dir"
+archive="actions-runner-linux-x64-$runner_version.tar.gz"
+tmp_runner=$(mktemp -d)
+trap 'rm -rf "$tmp_runner"' EXIT
+curl -fL --retry 5 --retry-all-errors \
+  -o "$tmp_runner/$archive" \
+  "https://github.com/actions/runner/releases/download/v$runner_version/$archive"
+printf '%s  %s\n' "$runner_sha256" "$tmp_runner/$archive" | sha256sum -c -
+if [[ ! -x "$runner_dir/run.sh" ]]; then
+  sudo -u "$runner_user" tar -xzf "$tmp_runner/$archive" -C "$runner_dir"
+fi
+sudo "$runner_dir/bin/installdependencies.sh"
+if [[ ! -f "$runner_dir/.runner" ]]; then
+  sudo -u "$runner_user" "$runner_dir/config.sh" \
+    --unattended \
+    --url "https://github.com/$repo" \
+    --token "$token" \
+    --name "$name" \
+    --work _work \
+    --labels "$labels"
+fi
+unset token RUNNER_REGISTRATION_TOKEN
+if [[ ! -s "$runner_dir/.service" ]]; then
+  sudo "$runner_dir/svc.sh" install "$runner_user"
+fi
+sudo "$runner_dir/svc.sh" start
+
+printf 'runner=%s\nrepo=%s\nlabels=%s\nzig=%s\n' "$name" "$repo" "$labels" "$(zig version)"
+python --version
+sudo "$runner_dir/svc.sh" status || true
