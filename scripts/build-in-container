@@ -22,7 +22,7 @@ image=${FUNKEY_BUILD_IMAGE:-localhost/funkey-os-build:focal-rust}
 build_dir=${FUNKEY_BUILD_DIR:-$repo/../funkey-os-build}
 jobs=${FUNKEY_JOBS:-$(nproc 2>/dev/null || echo 4)}
 
-mkdir -p "$build_dir/logs" "$build_dir/ccache" "$build_dir/cargo-target"
+mkdir -p "$build_dir/logs" "$build_dir/ccache" "$build_dir/cargo-target" "$build_dir/cargo-registry" "$build_dir/cargo-git"
 build_dir=$(CDPATH= cd -- "$build_dir" && pwd)
 
 if ! "$runtime" image exists "$image" 2>/dev/null; then
@@ -49,6 +49,7 @@ if [ "${1:-}" = shell ]; then
 	exec "$runtime" run --rm -it $label_opt $extra_mounts \
 		-v "$repo:$repo" -v "$build_dir/ccache:/root/.buildroot-ccache" \
 		-v "$build_dir/cargo-target:$repo/.cargo-target" \
+		-v "$build_dir/cargo-registry:/opt/cargo/registry" -v "$build_dir/cargo-git:/opt/cargo/git" \
 		-w "$repo" "$image" bash
 fi
 
@@ -66,6 +67,7 @@ exec "$runtime" run --rm -i $tty_opt $label_opt $extra_mounts \
 	-v "$build_dir:$build_dir" \
 	-v "$build_dir/ccache:/root/.buildroot-ccache" \
 	-v "$build_dir/cargo-target:$repo/.cargo-target" \
+	-v "$build_dir/cargo-registry:/opt/cargo/registry" -v "$build_dir/cargo-git:/opt/cargo/git" \
 	-w "$repo" \
 	-e "FUNKEY_JOBS=$jobs" \
 	"$image" \
