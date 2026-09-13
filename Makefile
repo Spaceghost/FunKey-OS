@@ -22,7 +22,7 @@ BR = make -C buildroot
 
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
 E2FSPROGS_FAKE_TIME ?= $(SOURCE_DATE_EPOCH)
-FUNKEY_GIT_DIRTY = $(shell test -z "$$(git status --porcelain --untracked-files=normal 2>/dev/null)" || printf '%s' -dirty)
+FUNKEY_GIT_DIRTY = $(shell test -z "$$(git status --porcelain --untracked-files=normal --ignore-submodules=dirty 2>/dev/null)" || printf '%s' -dirty)
 FUNKEY_GIT_REV ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)$(FUNKEY_GIT_DIRTY)
 FUNKEY_VERSION ?= 2.3.0-spaceghost.g$(FUNKEY_GIT_REV)
 export SOURCE_DATE_EPOCH E2FSPROGS_FAKE_TIME FUNKEY_VERSION
