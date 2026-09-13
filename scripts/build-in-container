@@ -1,0 +1,72 @@
+#!/bin/sh
+# Build FunKey-OS for the RG Nano inside the pinned Ubuntu 20.04 build image.
+#
+#   scripts/build-in-container [make targets or a command...]   (default: all)
+#   scripts/build-in-container shell                             (interactive)
+#
+# The checkout is bind-mounted at the same absolute path it has on the host, so
+# Buildroot outputs, ccache entries, and logs are byte-identical to a native
+# build and stay valid across container runs. Git worktrees are supported: the
+# main repository's .git directory is mounted read-write alongside it.
+#
+# Environment:
+#   FUNKEY_BUILD_IMAGE   image tag (default localhost/funkey-os-build:focal-rust)
+#   FUNKEY_RUNTIME       podman (default) or docker
+#   FUNKEY_BUILD_DIR     host dir for logs and caches (default ../funkey-os-build)
+#   FUNKEY_JOBS          parallel jobs passed to make (default: nproc)
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+runtime=${FUNKEY_RUNTIME:-podman}
+image=${FUNKEY_BUILD_IMAGE:-localhost/funkey-os-build:focal-rust}
+build_dir=${FUNKEY_BUILD_DIR:-$repo/../funkey-os-build}
+jobs=${FUNKEY_JOBS:-$(nproc 2>/dev/null || echo 4)}
+
+mkdir -p "$build_dir/logs" "$build_dir/ccache" "$build_dir/cargo-target"
+build_dir=$(CDPATH= cd -- "$build_dir" && pwd)
+
+if ! "$runtime" image exists "$image" 2>/dev/null; then
+	echo "### building container image $image (Ubuntu 20.04 + Zig 0.16.0 + Rust 1.91.0)"
+	"$runtime" build -t "${image%-rust}" -f "$repo/docker/focal-ci/Dockerfile" "$repo/docker/focal-ci"
+	"$runtime" build -t "$image" -f "$repo/docker/focal-ci/Dockerfile.rust" "$repo/docker/focal-ci"
+fi
+
+# Git worktrees keep their metadata under the main repository's .git directory.
+common_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$repo/.git")
+extra_mounts=""
+case "$common_dir" in
+	"$repo"/*) ;;
+	*) extra_mounts="-v $common_dir:$common_dir" ;;
+esac
+
+label_opt=""
+case "$runtime" in
+	podman) label_opt="--security-opt=label=disable" ;;
+esac
+
+if [ "${1:-}" = shell ]; then
+	# shellcheck disable=SC2086
+	exec "$runtime" run --rm -it $label_opt $extra_mounts \
+		-v "$repo:$repo" -v "$build_dir/ccache:/root/.buildroot-ccache" \
+		-v "$build_dir/cargo-target:$repo/.cargo-target" \
+		-w "$repo" "$image" bash
+fi
+
+[ $# -gt 0 ] || set -- all
+log="$build_dir/logs/$(date +%Y%m%d-%H%M%S)-$(printf '%s' "$*" | tr -c 'A-Za-z0-9_.-' '_').log"
+echo "### log: $log"
+
+tty_opt=""
+[ -t 0 ] && tty_opt="-t"
+
+# shellcheck disable=SC2086
+exec "$runtime" run --rm -i $tty_opt $label_opt $extra_mounts \
+	--name "funkey-build-$$" \
+	-v "$repo:$repo" \
+	-v "$build_dir:$build_dir" \
+	-v "$build_dir/ccache:/root/.buildroot-ccache" \
+	-v "$build_dir/cargo-target:$repo/.cargo-target" \
+	-w "$repo" \
+	-e "FUNKEY_JOBS=$jobs" \
+	"$image" \
+	bash -c 'log=$1; shift; case "$1" in make|./*|scripts/*) cmd=("$@");; *) cmd=(make -j"$FUNKEY_JOBS" "$@");; esac; "${cmd[@]}" 2>&1 | tee "$log"; exit "${PIPESTATUS[0]}"' _ "$log" "$@"
