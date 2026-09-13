@@ -128,13 +128,18 @@ export AR_arm_unknown_linux_musleabihf="$archiver"
 # a conventional GCC cross-toolchain expects the documented hyphenated form.
 # The generated FunKey zig cc wrapper reports either Zig or Clang here.
 compiler_banner=$("$linker" --version 2>&1 | head -n 1 || true)
+# rustc's musl targets link their own bundled C runtime and libc
+# ("self-contained" mode, with -nostartfiles). zig cc always supplies its own
+# musl crt1.o for a static link, which collides with rustc's copy (duplicate
+# _start). Let Zig provide the whole runtime instead; GCC keeps rustc's.
+link_self_contained=""
 case "$compiler_banner" in
-    *[Zz]ig*|*[Cc]lang*) c_target_cpu=cortex_a7 ;;
+    *[Zz]ig*|*[Cc]lang*) c_target_cpu=cortex_a7; link_self_contained="-C link-self-contained=no" ;;
     *) c_target_cpu=cortex-a7 ;;
 esac
 printf 'Iroh C compiler: %s (cpu=%s)\n' "${compiler_banner:-unknown}" "$c_target_cpu"
 export CFLAGS_arm_unknown_linux_musleabihf="-mcpu=$c_target_cpu -mfpu=neon-vfpv4 -mfloat-abi=hard"
-export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=cortex-a7 -C target-feature=+neon,+vfp4 -C link-arg=-Wl,--gc-sections"
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=cortex-a7 -C target-feature=+neon,+vfp4 -C link-arg=-Wl,--gc-sections $link_self_contained"
 
 printf 'building funkey-iroh with %s for %s\n' "$rust_version" "$target"
 "${cargo_command[@]}" build \
@@ -254,6 +259,27 @@ write $usb_profile usb-gadget
 EOF
 fi
 
+# debugfs 1.45 (Buildroot's e2fsprogs) creates "write" targets in its current
+# directory and treats a destination containing slashes as a literal file
+# name. Rewrite every write into an explicit cd + basename so the commands
+# work with both old and path-aware debugfs versions.
+portable_debugfs_commands()
+{
+    awk '
+        $1 == "write" && $3 ~ "^/" {
+            dest = $3
+            sub("/[^/]*$", "", dest)
+            if (dest == "") dest = "/"
+            base = $3
+            sub("^.*/", "", base)
+            print "cd " dest
+            print "write " $2 " " base
+            next
+        }
+        { print }
+    ' "$1" > "$1.portable" && mv "$1.portable" "$1"
+}
+portable_debugfs_commands "$commands"
 E2FSPROGS_FAKE_TIME="$filesystem_time" \
     "$debugfs_bin" -w -f "$commands" "$funkey_rootfs" \
     >"$backup_dir/debugfs-funkey.log" 2>&1 || {
