@@ -40,12 +40,15 @@ MESSAGE = echo "$(shell date +%Y-%m-%dT%H:%M:%S) $(TERM_BOLD)\#\#\# $(call qstri
 TERM_BOLD := $(shell tput smso 2>/dev/null)
 TERM_RESET := $(shell tput rmso 2>/dev/null)
 
-.PHONY: all firmware prepare-buildroot fun fun-recovery fun-funkey source image update checksums package-image package-update package-checksums package-inventory usb-variants defconfig clean distclean print-version zig-host zig-defconfig zig-cc zig-restore zig-all zig-variants
+.PHONY: features all firmware prepare-buildroot fun fun-recovery fun-funkey source image update checksums package-image package-update package-checksums package-inventory usb-variants defconfig clean distclean print-version zig-host zig-defconfig zig-cc zig-restore zig-all zig-variants
 
 .IGNORE: _Makefile_
 
 all: zig-all
 	@:
+
+features:
+	@./scripts/funkey-features
 
 firmware: checksums package-inventory
 	@:

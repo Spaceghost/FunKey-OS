@@ -132,7 +132,31 @@ game data is not embedded in every OS image and update. See
 
 ## Build in a container
 
-### Prerequisites
+### Quick path: build the checkout in place (Podman or Docker)
+`scripts/build-in-container` runs any `make` target of this checkout inside
+the pinned Ubuntu 20.04 image (`docker/focal-ci/Dockerfile.rust`: GCC, Zig
+0.16.0, Rust 1.91.0 with the ARM musl target). The checkout is mounted at its
+own path, so `images/`, `FunKey/output/`, the download cache and ccache stay
+on the host between runs:
+```bash
+$ scripts/build-in-container            # make -j$(nproc) all  (Zig production firmware)
+$ scripts/build-in-container firmware   # same with the GNU toolchain
+$ scripts/build-in-container shell      # interactive shell in the build image
+```
+Logs land in `../funkey-os-build/logs/`. Set `FUNKEY_RUNTIME=docker` to use
+Docker instead of Podman.
+
+### Pick features interactively
+`make features` (or `scripts/funkey-features`) opens a checklist for the
+firmware outputs (production, USB network-only, persistent USB-debug, Iroh,
+Iroh + USB-debug, SDK), the C toolchain (Zig or GNU), the optional on-device
+applications (RetroFE, GMenu2X, PicoArch, Commander, GMU, ST-SDL, Clock, Bibi)
+and whether to build in the container. Press `b` to build the selection or
+`p` to print the equivalent commands. The selection is remembered in
+`.funkey-features.json`; `scripts/funkey-features --set iroh=on --build` does
+the same without the UI.
+
+### Prerequisites for the self-contained image
 When using a Docker container, all the prerequisites are automatically installed.
 
 ### How to get the sources

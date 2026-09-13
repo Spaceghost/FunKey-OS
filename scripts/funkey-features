@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""Interactive feature selection and build driver for FunKey-OS on the RG Nano.
+
+Run ``make features`` (or ``scripts/funkey-features``) to pick firmware
+outputs, the C toolchain, optional on-device applications, and where the build
+runs. The selection is saved in ``.funkey-features.json`` and turned into an
+ordered build plan. Non-interactive use::
+
+    scripts/funkey-features --plan                # show the plan for the saved selection
+    scripts/funkey-features --set iroh=on --build # change one switch and build
+    scripts/funkey-features --reset               # forget the saved selection
+
+Every build step is an ordinary ``make`` target or repository script, so the
+generated plan can also be copied into a shell.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+
+REPO = Path(__file__).resolve().parent.parent
+STATE_FILE = REPO / ".funkey-features.json"
+DEFCONFIG = REPO / "FunKey" / "configs" / "funkey_defconfig"
+FEATURE_DEFCONFIG = REPO / "FunKey" / "output" / "funkey_features_defconfig"
+
+# id, title, description, default, extra
+# kind "output": firmware artefacts, "toolchain": exclusive choice,
+# "package": Buildroot symbol in the FunKey tree, "exec": how to run.
+FEATURES = [
+    # -- Firmware outputs ---------------------------------------------------
+    {
+        "id": "production",
+        "kind": "output",
+        "title": "Production firmware (.img.xz + .fwu)",
+        "desc": "Base RG Nano SD-card image and USB firmware update, with checksums and package inventories.",
+        "default": True,
+        "locked": True,
+    },
+    {
+        "id": "network-only",
+        "kind": "output",
+        "title": "USB network-only variant",
+        "desc": "USB gadget exposes only Ethernet/SSH; the shared partition stays mounted on the device.",
+        "default": False,
+    },
+    {
+        "id": "usb-debug",
+        "kind": "output",
+        "title": "Persistent USB-debug variant",
+        "desc": "Serial console, SSH and boot logs over USB from first boot; for hardware validation loops.",
+        "default": False,
+    },
+    {
+        "id": "iroh",
+        "kind": "output",
+        "title": "Iroh save sharing + netplay firmware",
+        "desc": "Adds the Rust Iroh daemon, launcher UI and PicoArch wrapper (needs Rust 1.91 + ARM musl target).",
+        "default": False,
+    },
+    {
+        "id": "iroh-usb-debug",
+        "kind": "output",
+        "title": "Iroh + USB-debug combined firmware",
+        "desc": "The Iroh firmware with the persistent USB-debug profile and a recovery manifest.",
+        "default": False,
+    },
+    {
+        "id": "sdk",
+        "kind": "output",
+        "title": "Cross-development SDK tarball",
+        "desc": "Builds the relocatable FunKey SDK (extra ~30 min); only needed for out-of-tree development.",
+        "default": False,
+    },
+    # -- Toolchain ----------------------------------------------------------
+    {
+        "id": "zig",
+        "kind": "toolchain",
+        "title": "Zig 0.16 C/C++ frontends (strict profile, default)",
+        "desc": "All C/C++ compilation goes through zig cc; the GNU runtime stays for target libraries.",
+        "default": True,
+    },
+    {
+        "id": "gnu",
+        "kind": "toolchain",
+        "title": "GNU GCC external toolchain only",
+        "desc": "Plain Buildroot build with the FunKey musl GCC toolchain; matches upstream FunKey-OS.",
+        "default": False,
+    },
+    # -- Applications (Buildroot packages of the FunKey tree) ---------------
+    {"id": "retrofe", "kind": "package", "symbol": "BR2_PACKAGE_RETROFE", "title": "RetroFE launcher", "desc": "Themed game front-end (default launcher)."},
+    {"id": "gmenu2x", "kind": "package", "symbol": "BR2_PACKAGE_GMENU2X", "title": "GMenu2X launcher", "desc": "Lightweight OPK launcher and settings menu."},
+    {"id": "picoarch", "kind": "package", "symbol": "BR2_PACKAGE_PICOARCH", "title": "PicoArch libretro frontend", "desc": "Runs the bundled libretro cores; required for emulation."},
+    {"id": "commander", "kind": "package", "symbol": "BR2_PACKAGE_COMMANDER", "title": "Commander file manager", "desc": "Two-pane file manager with image viewer."},
+    {"id": "gmu", "kind": "package", "symbol": "BR2_PACKAGE_GMU", "title": "GMU music player", "desc": "Plays MP3/OGG/FLAC/WavPack/tracker music from the SD card."},
+    {"id": "st-sdl", "kind": "package", "symbol": "BR2_PACKAGE_ST_SDL", "title": "ST-SDL terminal", "desc": "On-device terminal emulator."},
+    {"id": "clock", "kind": "package", "symbol": "BR2_PACKAGE_CLOCK", "title": "Clock app", "desc": "Sets the date and time from GMenu2X."},
+    {"id": "bibi", "kind": "package", "symbol": "BR2_PACKAGE_BIBI", "title": "Bibi (FunKey S demo)", "desc": "Legacy FunKey S demo application; dropped from the RG Nano images by default."},
+    # -- Execution ----------------------------------------------------------
+    {
+        "id": "container",
+        "kind": "exec",
+        "title": "Build inside the pinned Ubuntu 20.04 container",
+        "desc": "Uses scripts/build-in-container (Podman/Docker). Turn off when already inside the container or on a prepared Ubuntu 20.04 host.",
+        "default": None,  # decided at runtime
+    },
+]
+
+SECTIONS = [
+    ("output", "Firmware outputs"),
+    ("toolchain", "C toolchain (choose one)"),
+    ("package", "On-device applications"),
+    ("exec", "Where to build"),
+]
+
+
+def by_id(fid: str) -> dict:
+    for feature in FEATURES:
+        if feature["id"] == fid:
+            return feature
+    raise KeyError(fid)
+
+
+def read_config_symbols() -> Dict[str, bool]:
+    """Effective package symbols: FunKey/output/.config if present, else defconfig + Config.in defaults."""
+    symbols: Dict[str, bool] = {}
+    config = REPO / "FunKey" / "output" / ".config"
+    sources = [config] if config.is_file() else [DEFCONFIG]
+    for source in sources:
+        for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = re.match(r"^(BR2_PACKAGE_[A-Z0-9_]+)=y", line)
+            if match:
+                symbols[match.group(1)] = True
+            match = re.match(r"^# (BR2_PACKAGE_[A-Z0-9_]+) is not set", line)
+            if match:
+                symbols[match.group(1)] = False
+    if not config.is_file():
+        # Config.in defaults for packages the defconfig does not mention.
+        for feature in FEATURES:
+            symbol = feature.get("symbol")
+            if not symbol or symbol in symbols:
+                continue
+            pkg_dir = REPO / "FunKey" / "package"
+            for config_in in pkg_dir.glob("*/Config.in"):
+                text = config_in.read_text(encoding="utf-8", errors="replace")
+                if re.search(rf"^config {symbol}\b", text, re.M):
+                    block = text.split(f"config {symbol}", 1)[1]
+                    block = block.split("\nconfig ", 1)[0]
+                    symbols[symbol] = bool(re.search(r"^\s*default y", block, re.M))
+                    break
+    return symbols
+
+
+def default_state() -> Dict[str, bool]:
+    symbols = read_config_symbols()
+    state: Dict[str, bool] = {}
+    for feature in FEATURES:
+        if feature["kind"] == "package":
+            state[feature["id"]] = symbols.get(feature["symbol"], False)
+        elif feature["id"] == "container":
+            inside = Path("/.dockerenv").exists() or os.environ.get("FUNKEY_CI_IMAGE_REVISION")
+            state[feature["id"]] = bool(not inside and (shutil.which("podman") or shutil.which("docker")))
+        else:
+            state[feature["id"]] = bool(feature.get("default"))
+    return state
+
+
+def load_state() -> Dict[str, bool]:
+    state = default_state()
+    if STATE_FILE.is_file():
+        try:
+            saved = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            state.update({k: bool(v) for k, v in saved.items() if k in state})
+        except (OSError, ValueError):
+            pass
+    return normalise(state)
+
+
+def normalise(state: Dict[str, bool]) -> Dict[str, bool]:
+    state["production"] = True
+    if state.get("zig") == state.get("gnu"):
+        state["zig"], state["gnu"] = True, False
+    if state.get("iroh-usb-debug"):
+        state["iroh"] = True
+    return state
+
+
+def save_state(state: Dict[str, bool]) -> None:
+    STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def toggle(state: Dict[str, bool], fid: str) -> None:
+    feature = by_id(fid)
+    if feature.get("locked"):
+        return
+    if feature["kind"] == "toolchain":
+        for other in FEATURES:
+            if other["kind"] == "toolchain":
+                state[other["id"]] = other["id"] == fid
+        return
+    state[fid] = not state.get(fid, False)
+    normalise(state)
+
+
+# -- Build plan -------------------------------------------------------------
+
+def package_overrides(state: Dict[str, bool]) -> Dict[str, bool]:
+    baseline = default_state()
+    return {
+        by_id(f["id"])["symbol"]: state[f["id"]]
+        for f in FEATURES
+        if f["kind"] == "package" and state[f["id"]] != baseline[f["id"]]
+    }
+
+
+def write_feature_defconfig(overrides: Dict[str, bool]) -> Path:
+    lines = [
+        line
+        for line in DEFCONFIG.read_text(encoding="utf-8").splitlines()
+        if not any(re.match(rf"^(# )?{re.escape(sym)}( is not set|=)", line) for sym in overrides)
+    ]
+    for symbol, enabled in sorted(overrides.items()):
+        lines.append(f"{symbol}=y" if enabled else f"# {symbol} is not set")
+    FEATURE_DEFCONFIG.parent.mkdir(parents=True, exist_ok=True)
+    FEATURE_DEFCONFIG.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return FEATURE_DEFCONFIG
+
+
+def build_plan(state: Dict[str, bool]) -> List[List[str]]:
+    jobs = os.environ.get("FUNKEY_JOBS") or str(os.cpu_count() or 4)
+    make = ["make", f"-j{jobs}"]
+    plan: List[List[str]] = []
+
+    overrides = package_overrides(state)
+    if overrides:
+        defconfig = write_feature_defconfig(overrides)
+        plan.append(make + ["FunKey/defconfig", f"BR2_DEFCONFIG={defconfig}"])
+    else:
+        plan.append(make + ["FunKey/funkey_defconfig"])
+    plan.append(make + ["Recovery/recovery_defconfig"])
+
+    if state["zig"]:
+        plan.append(make + ["zig-all"])
+    else:
+        plan.append(make + ["firmware"])
+
+    version = ["$(make -s print-version)"]
+    if state["network-only"]:
+        plan.append(["scripts/build-usb-network-variant"] + version)
+    if state["usb-debug"]:
+        plan.append(["scripts/build-usb-debug-variant"] + version)
+    if state["iroh"]:
+        plan.append(["scripts/build-iroh-variant"] + version + ["iroh"])
+    if state["iroh-usb-debug"]:
+        plan.append(["scripts/build-iroh-variant"] + version + ["iroh-usb-debug", "scripts/usb-gadget-debug"])
+    if state["sdk"]:
+        plan.append(make + ["sdk"])
+    return plan
+
+
+def render_plan(state: Dict[str, bool]) -> str:
+    wrapper = "scripts/build-in-container " if state["container"] else ""
+    lines = ["Build plan:"]
+    for step in build_plan(state):
+        lines.append("  " + wrapper + " ".join(step))
+    if state["iroh"] and not state["container"]:
+        lines.append("  (Iroh needs rustup toolchain 1.91.0 with target arm-unknown-linux-musleabihf on this host)")
+    return "\n".join(lines)
+
+
+def run_plan(state: Dict[str, bool]) -> int:
+    save_state(state)
+    print(render_plan(state))
+    version: Optional[str] = None
+    for step in build_plan(state):
+        cmd = list(step)
+        if "$(make -s print-version)" in cmd:
+            if version is None:
+                version = subprocess.run(
+                    ["make", "-s", "print-version"], cwd=REPO, check=True, capture_output=True, text=True
+                ).stdout.strip()
+            cmd = [version if part == "$(make -s print-version)" else part for part in cmd]
+        if state["container"]:
+            cmd = ["scripts/build-in-container"] + cmd
+        print(f"\n### {' '.join(cmd)}", flush=True)
+        result = subprocess.run(cmd, cwd=REPO)
+        if result.returncode != 0:
+            print(f"step failed with exit code {result.returncode}: {' '.join(cmd)}", file=sys.stderr)
+            return result.returncode
+    images = REPO / "images"
+    if images.is_dir():
+        print("\nArtifacts in images/:")
+        for path in sorted(images.iterdir()):
+            if path.is_file() and path.suffix in {".xz", ".fwu", ".img", ".txt", ".gz", ".json"}:
+                print(f"  {path.stat().st_size / 1048576:8.1f} MiB  {path.name}")
+    return 0
+
+
+# -- Terminal UI ------------------------------------------------------------
+
+def run_tui(state: Dict[str, bool]) -> Optional[str]:
+    import curses
+
+    rows: List[Optional[str]] = []  # feature id or None for section headings
+    for kind, title in SECTIONS:
+        rows.append(None)
+        rows.extend(f["id"] for f in FEATURES if f["kind"] == kind)
+    selectable = [i for i, r in enumerate(rows) if r]
+    action: Optional[str] = None
+
+    def draw(screen, cursor: int) -> None:
+        screen.erase()
+        height, width = screen.getmaxyx()
+        screen.addnstr(0, 0, "FunKey-OS RG Nano feature selection", width - 1, curses.A_BOLD)
+        screen.addnstr(1, 0, "space/enter: toggle   b: build now   p: print plan and exit   q: quit", width - 1)
+        y = 3
+        for index, row in enumerate(rows):
+            if y >= height - 3:
+                break
+            if row is None:
+                heading = dict(SECTIONS)[FEATURES[[f["id"] for f in FEATURES].index(rows[index + 1])]["kind"]]
+                screen.addnstr(y, 0, heading, width - 1, curses.A_UNDERLINE)
+                y += 1
+                continue
+            feature = by_id(row)
+            mark = "(*)" if feature["kind"] == "toolchain" and state[row] else "( )" if feature["kind"] == "toolchain" else "[x]" if state[row] else "[ ]"
+            attr = curses.A_REVERSE if index == cursor else curses.A_NORMAL
+            screen.addnstr(y, 2, f"{mark} {feature['title']}", width - 3, attr)
+            y += 1
+        feature = by_id(rows[cursor])
+        screen.addnstr(height - 2, 0, feature["desc"], width - 1, curses.A_DIM)
+        screen.refresh()
+
+    def main(screen) -> None:
+        nonlocal action
+        curses.curs_set(0)
+        pos = 0
+        while True:
+            draw(screen, selectable[pos])
+            key = screen.getch()
+            if key in (curses.KEY_UP, ord("k")):
+                pos = max(0, pos - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                pos = min(len(selectable) - 1, pos + 1)
+            elif key in (ord(" "), ord("\n"), curses.KEY_ENTER):
+                toggle(state, rows[selectable[pos]])
+            elif key in (ord("b"), ord("B")):
+                action = "build"
+                return
+            elif key in (ord("p"), ord("P")):
+                action = "plan"
+                return
+            elif key in (ord("q"), ord("Q"), 27):
+                action = "quit"
+                return
+
+    curses.wrapper(main)
+    return action
+
+
+def main(argv: List[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--set", action="append", default=[], metavar="ID=on|off", help="change a switch without the UI")
+    parser.add_argument("--plan", action="store_true", help="print the build plan and exit")
+    parser.add_argument("--build", action="store_true", help="run the build plan without the UI")
+    parser.add_argument("--reset", action="store_true", help="forget the saved selection")
+    parser.add_argument("--list", action="store_true", help="list switches and their current state")
+    args = parser.parse_args(argv)
+
+    if args.reset and STATE_FILE.exists():
+        STATE_FILE.unlink()
+    state = load_state()
+    for item in args.set:
+        fid, _, value = item.partition("=")
+        if fid not in state or value not in {"on", "off"}:
+            parser.error(f"unknown switch or value: {item}")
+        if by_id(fid)["kind"] == "toolchain":
+            if value == "on":
+                toggle(state, fid)
+        else:
+            state[fid] = value == "on"
+    normalise(state)
+
+    if args.list:
+        for kind, title in SECTIONS:
+            print(title)
+            for feature in FEATURES:
+                if feature["kind"] == kind:
+                    print(f"  {'on ' if state[feature['id']] else 'off'}  {feature['id']:<16} {feature['title']}")
+        save_state(state)
+        return 0
+    if args.plan:
+        save_state(state)
+        print(render_plan(state))
+        return 0
+    if args.build:
+        return run_plan(state)
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        save_state(state)
+        print(render_plan(state))
+        print("\n(no terminal: use --build to run this plan, --set ID=on|off to change it)")
+        return 0
+
+    action = run_tui(state)
+    save_state(state)
+    if action == "build":
+        return run_plan(state)
+    if action == "plan":
+        print(render_plan(state))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
