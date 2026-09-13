@@ -6,3 +6,9 @@ br.log
 /images/
 *.so
 /.funkey-features.json
+__pycache__/
+/tmp-update/
+/.sdcard-image.*/
+/.usb-variant.*/
+/.iroh-variant.*/
+/.cargo-target/
