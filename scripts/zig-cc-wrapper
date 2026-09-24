@@ -66,6 +66,7 @@ for arg in "$@"; do
 done
 
 args=()
+map_file=
 dep_file=
 separate_deps=false
 if $emit_assembly || $preprocess_output; then
@@ -140,8 +141,10 @@ for arg in "$@"; do
 		-Ttext)
 			args+=("-Wl,-Ttext")
 			next_is_linker_value=true ;;
-		-Wl,-Map,*|-Wl,-Map=*)
-			args+=("$arg") ;;
+		-Wl,-Map,*)
+			map_file=${arg#-Wl,-Map,} ;;
+		-Wl,-Map=*)
+			map_file=${arg#-Wl,-Map=} ;;
 		-Wl,-stats)
 			;;
 		-Wl,*,-stats,-lc)
@@ -248,7 +251,14 @@ command=(zig "$driver" \
 	-Wno-error=tautological-overlap-compare \
 	-Wno-error=zero-length-array)
 
-"${command[@]}"
+if [[ -n $map_file ]]; then
+	# Zig rejects GNU ld's -Map filename option, but forwards --print-map
+	# to its linker. Preserve the real map, including symbols and addresses,
+	# instead of discarding BusyBox's requested diagnostic artifact.
+	"${command[@]}" -Wl,--print-map > "$map_file"
+else
+	"${command[@]}"
+fi
 
 if $separate_deps && [[ -n $dep_file ]]; then
 	dep_command=()
