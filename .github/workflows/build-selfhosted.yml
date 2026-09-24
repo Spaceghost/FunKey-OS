@@ -42,10 +42,10 @@ jobs:
           set -euo pipefail
           . /etc/os-release
           test "$ID" = ubuntu
-          test "$VERSION_ID" = 20.04
+          test "$VERSION_ID" = 22.04
           test "$(uname -m)" = x86_64
           test "$(zig version)" = 0.16.0
-          test "$(python --version 2>&1)" = 'Python 3.8.10'
+          test "$(python --version 2>&1)" = 'Python 3.10.12'
           git --version
           gcc --version | sed -n '1p'
 
