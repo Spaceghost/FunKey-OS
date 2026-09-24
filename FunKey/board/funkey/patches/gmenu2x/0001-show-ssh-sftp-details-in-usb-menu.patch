@@ -60,7 +60,7 @@ index 388b8ce..58969e9 100644
 +				static const char *usb_network_info[] = {
 +					"SSH / SFTP",
 +					"root@192.168.137.2",
-+					"password: none"
++					"SSH key required"
 +				};
 +
 +				if(usb_network_enabled && !menu_action && !menu_confirmation){

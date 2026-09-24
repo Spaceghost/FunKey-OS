@@ -46,8 +46,14 @@ esac
 # GCC recognizes those implicitly, while Zig/Clang requires an explicit -T.
 args=()
 boundary_section_link=false
+preprocessing=false
+stdin_input=false
+explicit_language=false
 for arg in "$@"; do
 	case "$arg" in
+		-E) preprocessing=true; args+=("$arg") ;;
+		-) stdin_input=true; args+=("$arg") ;;
+		-x|-x?*) explicit_language=true; args+=("$arg") ;;
 		*imagetool.o|*file2alias.o) boundary_section_link=true; args+=("$arg") ;;
 		-march=*|-mcpu=*|-mtune=*)
 			if [ "${#portable_cpu_args[@]}" -eq 0 ]; then
@@ -67,6 +73,15 @@ for arg in "$@"; do
 		*) args+=("$arg") ;;
 	esac
 done
+
+# Meson's macro probe is `cc -E -dM -`. Without an explicit language Zig
+# delegates that stdin-only invocation directly to Clang, which does not
+# understand Zig's CPU names. Select the driver's normal input language so
+# the probe follows the same Zig target handling as an ordinary source file.
+if $preprocessing && $stdin_input && ! $explicit_language; then
+	if [ "$driver" = c++ ]; then args=(-x c++ "${args[@]}")
+	else args=(-x c "${args[@]}"); fi
+fi
 
 # Older U-Boot image tools and Linux modpost rely on GNU ld retaining input
 # sections that synthesize boundary symbols. Disable section GC only for those

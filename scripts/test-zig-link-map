@@ -1,0 +1,40 @@
+#!/bin/bash
+# Exercise the installed wrapper with the real pinned Zig compiler.
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+test "$(zig version)" = 0.16.0
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/host/bin" "$work/host/arm-buildroot-linux-musleabihf/sysroot/usr/include" \
+  "$work/host/opt/ext-toolchain/lib/gcc/arm/test"
+cp "$repo/scripts/zig-cc-wrapper" "$work/host/bin/arm-linux-gcc"
+chmod +x "$work/host/bin/arm-linux-gcc"
+cd "$work"
+cat > probe.c <<'EOF'
+volatile unsigned result;
+void _start(void) { result = 42; for (;;) {} }
+EOF
+for spelling in comma equals; do
+  map="link $spelling.map"
+  case "$spelling" in
+    comma) option="-Wl,-Map,$map" ;;
+    equals) option="-Wl,-Map=$map" ;;
+  esac
+  "$work/host/bin/arm-linux-gcc" -nostdlib probe.c "$option" -o "$spelling.elf"
+  grep -q '_start' "$map"
+  grep -q 'result' "$map"
+  python3 - "$spelling.elf" <<'PY'
+import pathlib, sys
+elf = pathlib.Path(sys.argv[1]).read_bytes()
+assert elf[:6] == b'\x7fELF\x01\x01', 'expected little-endian ELF32'
+assert int.from_bytes(elf[18:20], 'little') == 40, 'expected ARM machine'
+PY
+done
+# Link errors must remain failures, even with map redirection enabled.
+printf '%s\n' 'extern void absent(void); void _start(void) { absent(); }' > bad.c
+if "$work/host/bin/arm-linux-gcc" -nostdlib bad.c -Wl,-Map,bad.map -o bad.elf >bad.out 2>bad.err; then
+  echo 'unresolved symbol incorrectly accepted' >&2
+  exit 1
+fi
+grep -q absent bad.err
+echo 'Zig ARM linker maps and unresolved-symbol rejection passed'
