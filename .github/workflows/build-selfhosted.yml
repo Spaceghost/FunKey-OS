@@ -52,6 +52,7 @@ jobs:
       - name: Validate update/debug tooling
         run: |
           bash ./scripts/test-zig-link-map
+          bash ./scripts/test-zig-host-probe
           ./scripts/test-firmware-update
           ./scripts/test-usb-network-hotplug
           ./scripts/test-usb-menu-info

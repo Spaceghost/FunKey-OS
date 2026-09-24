@@ -1,0 +1,19 @@
+#!/bin/bash
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+test "$(zig version)" = 0.16.0
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+"$repo/scripts/install-zig-host-tools" "$work/bin"
+# The exact stdin-only compiler detection used by Meson 0.56.
+"$work/bin/cc" -E -dM - </dev/null > "$work/c.macros"
+grep -q '__STDC__' "$work/c.macros"
+"$work/bin/c++" -E -dM - </dev/null > "$work/cxx.macros"
+grep -q '__cplusplus' "$work/cxx.macros"
+# Explicit language must still win over the compiler executable's default.
+"$work/bin/cc" -E -dM -x c++ - </dev/null > "$work/explicit.macros"
+grep -q '__cplusplus' "$work/explicit.macros"
+printf '%s\n' 'int main(void) { return 0; }' > "$work/main.c"
+"$work/bin/cc" "$work/main.c" -o "$work/main"
+"$work/main"
+echo 'Zig host C/C++ stdin macro probes and executable passed'
